@@ -300,6 +300,74 @@ def tg_webhook_impl():
                 tg_send_message(chat_id, start_text, start_kb)
                 return {"ok": True}
 
+            if text == "/myid":
+                is_admin = actor_id in PROMO_ADMIN_IDS
+                admins_preview = ", ".join(PROMO_ADMIN_IDS[:10]) if PROMO_ADMIN_IDS else "(пусто)"
+                tg_send_message(
+                    chat_id,
+                    "\n".join([
+                        "<b>Профиль Telegram</b>",
+                        f"ID: <code>{_h(actor_id)}</code>",
+                        f"username: @{_h(actor_name) if actor_name else '—'}",
+                        f"PROMO_ADMIN_IDS (загружено): <code>{_h(admins_preview)}</code>",
+                        f"admin доступ QR: <b>{'ДА' if is_admin else 'НЕТ'}</b>",
+                    ])
+                )
+                return {"ok": True}
+
+            if text == "/stat":
+                if actor_id not in PROMO_ADMIN_IDS:
+                    tg_send_message(chat_id, "Нет доступа.")
+                    return {"ok": True}
+
+                total_users_row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM tg_bot_users"
+                ).fetchone()
+                total_users = int(total_users_row["c"] or 0) if total_users_row else 0
+
+                promo_users_row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS c
+                    FROM tg_bot_users
+                    WHERE last_start_param LIKE 'promo_%'
+                    """
+                ).fetchone()
+                promo_users = int(promo_users_row["c"] or 0) if promo_users_row else 0
+
+                used_qr_row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM discount_codes WHERE status='USED'"
+                ).fetchone()
+                used_qr = int(used_qr_row["c"] or 0) if used_qr_row else 0
+
+                recent_redeems = conn.execute(
+                    """
+                    SELECT code, redeemed_at, redeemed_by_tg_id
+                    FROM discount_codes
+                    WHERE status='USED'
+                    ORDER BY datetime(redeemed_at) DESC, id DESC
+                    LIMIT 15
+                    """
+                ).fetchall()
+
+                lines = [
+                    "<b>Статистика бота</b>",
+                    "",
+                    f"Пользователей, нажавших /start: <b>{total_users}</b>",
+                    f"Из них открывали promo QR: <b>{promo_users}</b>",
+                    f"Погашено QR: <b>{used_qr}</b>",
+                ]
+
+                if recent_redeems:
+                    lines.extend(["", "<b>Последние погашения:</b>"])
+                    for r in recent_redeems:
+                        code = _h(r["code"] or "")
+                        redeemed_at = _h(r["redeemed_at"] or "—")
+                        admin_id = _h(r["redeemed_by_tg_id"] or "—")
+                        lines.append(f"• {code} — {redeemed_at} — админ {admin_id}")
+
+                tg_send_message(chat_id, "\n".join(lines))
+                return {"ok": True}
+
             if not text:
                 return {"ok": True}
 
