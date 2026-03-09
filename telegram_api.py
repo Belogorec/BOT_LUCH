@@ -46,3 +46,21 @@ def tg_answer_callback(callback_query_id: str, text: str = ""):
     if text:
         payload["text"] = text
     tg_post("answerCallbackQuery", payload)
+
+
+def tg_send_photo(chat_id: str, file_id: str, caption: str | None = None, reply_markup: dict | None = None, parse_mode: str = "HTML"):
+    """
+    Отправляет фото по file_id.
+    Telegram позволяет переиспользовать file_id без повторной загрузки файла.
+    """
+    payload = {
+        "chat_id": chat_id,
+        "photo": file_id,
+    }
+    if caption:
+        payload["caption"] = caption
+        payload["parse_mode"] = parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    data = tg_post("sendPhoto", payload)
+    return (data.get("result") or {}).get("message_id")

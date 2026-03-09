@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from flask import request, abort
 
 from config import TG_WEBHOOK_SECRET, PROMO_ADMIN_IDS, TG_CHAT_ID
-from telegram_api import tg_send_message, tg_edit_message, tg_answer_callback
+from telegram_api import tg_send_message, tg_edit_message, tg_answer_callback, tg_send_photo
 from booking_service import (
     compute_segment,
     upsert_guest_if_missing,
@@ -262,7 +262,8 @@ def tg_webhook_impl():
                                         "url": "https://botluch-production.up.railway.app/miniapp/reserve"
                                     }
                                 }
-                            ]
+                            ],
+                            [{"text": "🎵 Line-up"}]
                         ],
                         "resize_keyboard": True,
                         "one_time_keyboard": False
@@ -502,7 +503,8 @@ def tg_webhook_impl():
                                         "url": "https://botluch-production.up.railway.app/miniapp/reserve"
                                     }
                                 }
-                            ]
+                            ],
+                            [{"text": "🎵 Line-up"}]
                         ],
                         "resize_keyboard": True,
                         "one_time_keyboard": False
@@ -578,6 +580,95 @@ def tg_webhook_impl():
 
                 tg_send_message(chat_id, "\n".join(lines))
                 return {"ok": True}
+
+            if text == "/set_lineup":
+                if actor_id not in PROMO_ADMIN_IDS:
+                    tg_send_message(chat_id, "Нет доступа.")
+                    return {"ok": True}
+
+                # Создаём запись ожидания загрузки афиши
+                prompt_msg_id = tg_send_message(
+                    chat_id,
+                    "📸 <b>Загрузка афиши DJ</b>\n\nОтправьте картинку с афишей на неделю."
+                )
+
+                expires = (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds")
+                conn.execute(
+                    """
+                    INSERT INTO pending_replies (kind, booking_id, phone_e164, chat_id, actor_tg_id, prompt_message_id, expires_at)
+                    VALUES ('lineup_upload', 0, '', ?, ?, ?, ?)
+                    """,
+                    (chat_id, actor_id, str(prompt_msg_id), expires),
+                )
+                conn.commit()
+                return {"ok": True}
+
+            if text == "/lineup" or text.lower() == "line-up":
+                # Получаем последнюю афишу
+                lineup_row = conn.execute(
+                    "SELECT file_id, caption FROM lineup_posters ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+
+                if not lineup_row:
+                    tg_send_message(chat_id, "🎵 DJ line-up скоро появится!")
+                    return {"ok": True}
+
+                file_id = lineup_row["file_id"]
+                caption = lineup_row["caption"] or "🎵 <b>DJ line-up LUCH</b>\n\nПятница / Суббота"
+
+                tg_send_photo(chat_id, file_id, caption)
+                return {"ok": True}
+
+            # Обработка фото (для загрузки афиши)
+            photo = m.get("photo")
+            if photo:
+                # Проверяем есть ли pending для lineup_upload
+                pending_row = conn.execute(
+                    """
+                    SELECT id, expires_at
+                    FROM pending_replies
+                    WHERE actor_tg_id=? AND kind='lineup_upload'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (actor_id,),
+                ).fetchone()
+
+                if pending_row:
+                    try:
+                        exp = datetime.fromisoformat(str(pending_row["expires_at"]))
+                        if datetime.utcnow() > exp:
+                            conn.execute("DELETE FROM pending_replies WHERE id=?", (pending_row["id"],))
+                            conn.commit()
+                            return {"ok": True}
+                    except Exception:
+                        pass
+
+                    # Берём лучшее качество (последний элемент массива)
+                    file_id = photo[-1].get("file_id")
+
+                    if not file_id:
+                        tg_send_message(chat_id, "❌ Не удалось получить file_id изображения.")
+                        return {"ok": True}
+
+                    # Удаляем старые афиши
+                    conn.execute("DELETE FROM lineup_posters")
+
+                    # Сохраняем новую афишу
+                    caption = "🎵 <b>DJ line-up LUCH</b>\n\nПятница / Суббота"
+                    conn.execute(
+                        """
+                        INSERT INTO lineup_posters (file_id, caption, uploaded_by)
+                        VALUES (?, ?, ?)
+                        """,
+                        (file_id, caption, actor_id),
+                    )
+
+                    # Удаляем pending
+                    conn.execute("DELETE FROM pending_replies WHERE id=?", (pending_row["id"],))
+
+                    tg_send_message(chat_id, "✅ Афиша сохранена!")
+                    conn.commit()
+                    return {"ok": True}
 
             if not text:
                 return {"ok": True}

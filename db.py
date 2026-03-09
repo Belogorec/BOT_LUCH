@@ -184,6 +184,15 @@ def init_schema(conn: sqlite3.Connection):
         );
 
         CREATE INDEX IF NOT EXISTS idx_tg_bot_users_last_started_at ON tg_bot_users(last_started_at);
+
+        -- ===== lineup_posters =====
+        CREATE TABLE IF NOT EXISTS lineup_posters (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          file_id TEXT NOT NULL,
+          caption TEXT,
+          uploaded_by TEXT,
+          uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         """
     )
 
