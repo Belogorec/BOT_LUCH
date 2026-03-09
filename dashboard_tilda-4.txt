@@ -1,0 +1,828 @@
+<div class="ymdash" id="ymDash">
+  <div class="ymdash__wrap">
+    <div class="ymdash__topbar">
+      <div>
+        <div class="ymdash__eyebrow">LUCH RESERVE ANALYTICS</div>
+        <h1 class="ymdash__title">Дашборд бронирований</h1>
+        <div class="ymdash__subtitle">Стиль Яндекс Метрики, данные из текущего backend API</div>
+      </div>
+
+      <div class="ymdash__toolbar">
+        <label class="ymdash__control">
+          <span>Период</span>
+          <select id="ymPeriod">
+            <option value="today">Сегодня</option>
+            <option value="yesterday">Вчера</option>
+            <option value="week">7 дней</option>
+            <option value="30d">30 дней</option>
+          </select>
+        </label>
+
+        <button class="ymdash__btn" id="ymReload" type="button">Обновить</button>
+      </div>
+    </div>
+
+    <div class="ymdash__status" id="ymStatus">Инициализация…</div>
+
+    <div class="ymdash__grid ymdash__grid--kpi">
+      <div class="ymdash-card ymdash-card--kpi">
+        <div class="ymdash-card__label">Создано броней</div>
+        <div class="ymdash-card__value" id="kpiCreated">—</div>
+        <div class="ymdash-card__hint" id="kpiCreatedHint">События booking_events → CREATED</div>
+      </div>
+
+      <div class="ymdash-card ymdash-card--kpi">
+        <div class="ymdash-card__label">Фактические брони</div>
+        <div class="ymdash-card__value" id="kpiReserved">—</div>
+        <div class="ymdash-card__hint" id="kpiReservedHint">По полю reservation_dt</div>
+      </div>
+
+      <div class="ymdash-card ymdash-card--kpi">
+        <div class="ymdash-card__label">Соотношение</div>
+        <div class="ymdash-card__value" id="kpiRatio">—</div>
+        <div class="ymdash-card__hint" id="kpiRatioHint">Фактические / созданные</div>
+      </div>
+
+      <div class="ymdash-card ymdash-card--kpi">
+        <div class="ymdash-card__label">Пиковый слот</div>
+        <div class="ymdash-card__value" id="kpiPeak">—</div>
+        <div class="ymdash-card__hint" id="kpiPeakHint">Максимум по фактическому времени</div>
+      </div>
+    </div>
+
+    <div class="ymdash__grid ymdash__grid--main">
+      <section class="ymdash-card ymdash-card--chart ymdash-card--wide">
+        <div class="ymdash-card__head">
+          <div>
+            <h2 class="ymdash-card__title">Динамика бронирований</h2>
+            <div class="ymdash-card__meta" id="metaRange">—</div>
+          </div>
+          <div class="ymdash-card__legend-note">Создание брони vs фактическое время брони</div>
+        </div>
+        <div class="ymdash-chart ymdash-chart--lg">
+          <canvas id="chartTimeline"></canvas>
+        </div>
+      </section>
+
+      <section class="ymdash-card ymdash-card--chart">
+        <div class="ymdash-card__head">
+          <div>
+            <h2 class="ymdash-card__title">Сегменты гостей</h2>
+            <div class="ymdash-card__meta" id="metaSegments">Активные за 2 года</div>
+          </div>
+        </div>
+        <div class="ymdash-chart ymdash-chart--md">
+          <canvas id="chartSegments"></canvas>
+        </div>
+      </section>
+
+      <section class="ymdash-card ymdash-card--chart">
+        <div class="ymdash-card__head">
+          <div>
+            <h2 class="ymdash-card__title">Распределение по часам</h2>
+            <div class="ymdash-card__meta" id="metaHourly">Где создают и на какое время бронируют</div>
+          </div>
+        </div>
+        <div class="ymdash-chart ymdash-chart--md">
+          <canvas id="chartHourly"></canvas>
+        </div>
+      </section>
+    </div>
+
+    <div class="ymdash__grid ymdash__grid--bottom">
+      <section class="ymdash-card">
+        <div class="ymdash-card__head">
+          <div>
+            <h2 class="ymdash-card__title">Разбор периода</h2>
+            <div class="ymdash-card__meta">Краткая аналитическая выжимка</div>
+          </div>
+        </div>
+        <div class="ymdash-summary" id="summaryList"></div>
+      </section>
+
+      <section class="ymdash-card">
+        <div class="ymdash-card__head">
+          <div>
+            <h2 class="ymdash-card__title">Структура сегментов</h2>
+            <div class="ymdash-card__meta">По текущему API /admin/api/segments</div>
+          </div>
+        </div>
+        <div class="ymdash-tablewrap">
+          <table class="ymdash-table">
+            <thead>
+              <tr>
+                <th>Сегмент</th>
+                <th>Гостей</th>
+                <th>Доля</th>
+              </tr>
+            </thead>
+            <tbody id="segmentTableBody">
+              <tr><td colspan="3">Загрузка…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+<style>
+  .ymdash, .ymdash * { box-sizing: border-box; }
+
+  .ymdash{
+    min-height:100vh;
+    background:#f5f7fb;
+    color:#1f2937;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    padding:24px 14px 36px;
+  }
+
+  .ymdash__wrap{
+    max-width:1360px;
+    margin:0 auto;
+  }
+
+  .ymdash__topbar{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-end;
+    gap:18px;
+    flex-wrap:wrap;
+    margin-bottom:14px;
+  }
+
+  .ymdash__eyebrow{
+    font-size:11px;
+    line-height:1;
+    letter-spacing:.16em;
+    text-transform:uppercase;
+    color:#7b8794;
+    margin-bottom:8px;
+    font-weight:700;
+  }
+
+  .ymdash__title{
+    margin:0;
+    font-size:32px;
+    line-height:1.08;
+    font-weight:800;
+    color:#101828;
+  }
+
+  .ymdash__subtitle{
+    margin-top:8px;
+    font-size:14px;
+    color:#667085;
+  }
+
+  .ymdash__toolbar{
+    display:flex;
+    gap:10px;
+    align-items:flex-end;
+    flex-wrap:wrap;
+  }
+
+  .ymdash__control{
+    display:block;
+  }
+
+  .ymdash__control span{
+    display:block;
+    margin:0 0 6px 2px;
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.08em;
+    color:#667085;
+    font-weight:700;
+  }
+
+  .ymdash__control select{
+    height:44px;
+    min-width:160px;
+    border:1px solid #d0d5dd;
+    background:#fff;
+    color:#101828;
+    border-radius:12px;
+    padding:0 14px;
+    outline:none;
+    box-shadow:0 1px 2px rgba(16,24,40,.04);
+  }
+
+  .ymdash__btn{
+    height:44px;
+    border:0;
+    border-radius:12px;
+    padding:0 18px;
+    background:#ffcc00;
+    color:#111827;
+    font-weight:800;
+    cursor:pointer;
+    box-shadow:0 1px 2px rgba(16,24,40,.08);
+  }
+
+  .ymdash__btn:hover{ filter:brightness(.98); }
+
+  .ymdash__status{
+    margin-bottom:16px;
+    padding:10px 14px;
+    border-radius:12px;
+    background:#ffffff;
+    border:1px solid #e4e7ec;
+    color:#667085;
+    font-size:13px;
+  }
+
+  .ymdash__grid{
+    display:grid;
+    gap:16px;
+  }
+
+  .ymdash__grid--kpi{
+    grid-template-columns:repeat(4, minmax(0, 1fr));
+    margin-bottom:16px;
+  }
+
+  .ymdash__grid--main{
+    grid-template-columns:1.45fr .85fr;
+    margin-bottom:16px;
+    align-items:start;
+  }
+
+  .ymdash__grid--bottom{
+    grid-template-columns:1fr 1fr;
+  }
+
+  .ymdash-card{
+    background:#fff;
+    border:1px solid #e4e7ec;
+    border-radius:18px;
+    padding:18px;
+    box-shadow:0 1px 3px rgba(16,24,40,.05);
+  }
+
+  .ymdash-card--kpi{
+    padding:18px 18px 16px;
+  }
+
+  .ymdash-card--wide{
+    grid-row:span 2;
+  }
+
+  .ymdash-card__head{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:12px;
+    margin-bottom:14px;
+    flex-wrap:wrap;
+  }
+
+  .ymdash-card__title{
+    margin:0;
+    font-size:18px;
+    line-height:1.2;
+    font-weight:800;
+    color:#101828;
+  }
+
+  .ymdash-card__meta{
+    margin-top:6px;
+    font-size:13px;
+    color:#667085;
+  }
+
+  .ymdash-card__legend-note{
+    font-size:12px;
+    color:#667085;
+    line-height:1.35;
+    max-width:260px;
+    text-align:right;
+  }
+
+  .ymdash-card__label{
+    font-size:13px;
+    color:#667085;
+    margin-bottom:10px;
+    font-weight:600;
+  }
+
+  .ymdash-card__value{
+    font-size:34px;
+    line-height:1;
+    font-weight:800;
+    color:#101828;
+    letter-spacing:-0.02em;
+  }
+
+  .ymdash-card__hint{
+    margin-top:10px;
+    font-size:12px;
+    color:#667085;
+    line-height:1.35;
+  }
+
+  .ymdash-chart{
+    position:relative;
+    width:100%;
+  }
+
+  .ymdash-chart--lg{ height:420px; }
+  .ymdash-chart--md{ height:320px; }
+
+  .ymdash-chart canvas{
+    position:absolute;
+    inset:0;
+    width:100% !important;
+    height:100% !important;
+  }
+
+  .ymdash-summary{
+    display:grid;
+    gap:10px;
+  }
+
+  .ymdash-summary__item{
+    border:1px solid #eaecf0;
+    border-radius:14px;
+    padding:12px 14px;
+    background:#fcfcfd;
+  }
+
+  .ymdash-summary__title{
+    font-size:13px;
+    color:#475467;
+    font-weight:700;
+    margin-bottom:4px;
+  }
+
+  .ymdash-summary__text{
+    font-size:14px;
+    line-height:1.45;
+    color:#101828;
+  }
+
+  .ymdash-tablewrap{
+    overflow:auto;
+  }
+
+  .ymdash-table{
+    width:100%;
+    border-collapse:collapse;
+    font-size:14px;
+  }
+
+  .ymdash-table th,
+  .ymdash-table td{
+    text-align:left;
+    padding:12px 10px;
+    border-bottom:1px solid #eaecf0;
+  }
+
+  .ymdash-table th{
+    font-size:12px;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    color:#667085;
+    font-weight:800;
+  }
+
+  .ymdash-table td{
+    color:#101828;
+  }
+
+  .ymdash-pill{
+    display:inline-flex;
+    align-items:center;
+    min-height:28px;
+    padding:0 10px;
+    border-radius:999px;
+    background:#f2f4f7;
+    color:#344054;
+    font-size:12px;
+    font-weight:700;
+  }
+
+  @media (max-width: 1180px){
+    .ymdash__grid--kpi{ grid-template-columns:repeat(2, minmax(0, 1fr)); }
+    .ymdash__grid--main{ grid-template-columns:1fr; }
+    .ymdash-card--wide{ grid-row:auto; }
+    .ymdash__grid--bottom{ grid-template-columns:1fr; }
+  }
+
+  @media (max-width: 680px){
+    .ymdash{ padding:18px 10px 28px; }
+    .ymdash__title{ font-size:26px; }
+    .ymdash__grid--kpi{ grid-template-columns:1fr; }
+    .ymdash-chart--lg{ height:320px; }
+    .ymdash-chart--md{ height:280px; }
+    .ymdash-card__value{ font-size:28px; }
+  }
+</style>
+
+<script>
+(function(){
+  const API_BASE = "https://Barluch.pythonanywhere.com";
+  const DASH_KEY = "ass112345jdbfsjdhf873hsdjfh";
+
+  const $ = (id) => document.getElementById(id);
+
+  const elStatus = $("ymStatus");
+  const elPeriod = $("ymPeriod");
+  const elReload = $("ymReload");
+
+  const elKpiCreated = $("kpiCreated");
+  const elKpiReserved = $("kpiReserved");
+  const elKpiRatio = $("kpiRatio");
+  const elKpiPeak = $("kpiPeak");
+
+  const elKpiCreatedHint = $("kpiCreatedHint");
+  const elKpiReservedHint = $("kpiReservedHint");
+  const elKpiRatioHint = $("kpiRatioHint");
+  const elKpiPeakHint = $("kpiPeakHint");
+
+  const elMetaRange = $("metaRange");
+  const elMetaSegments = $("metaSegments");
+  const elMetaHourly = $("metaHourly");
+  const elSummaryList = $("summaryList");
+  const elSegmentTableBody = $("segmentTableBody");
+
+  const ctxTimeline = $("chartTimeline");
+  const ctxSegments = $("chartSegments");
+  const ctxHourly = $("chartHourly");
+
+  let chartTimeline = null;
+  let chartSegments = null;
+  let chartHourly = null;
+
+  function setStatus(text){
+    elStatus.textContent = text;
+  }
+
+  function qs(params){
+    return new URLSearchParams(params).toString();
+  }
+
+  async function apiGet(path, params){
+    const url = API_BASE + path + "?" + qs({ ...params, key: DASH_KEY });
+    const res = await fetch(url, { method: "GET" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  }
+
+  function destroyChart(ch){
+    if (ch && typeof ch.destroy === "function") ch.destroy();
+  }
+
+  function safeNum(v){
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function formatInt(v){
+    return new Intl.NumberFormat("ru-RU").format(safeNum(v));
+  }
+
+  function formatPct(v){
+    const n = Math.round(safeNum(v) * 10) / 10;
+    return (Number.isInteger(n) ? String(n) : String(n).replace(".", ",")) + "%";
+  }
+
+  function sum(arr){
+    return (arr || []).reduce((acc, x) => acc + safeNum(x), 0);
+  }
+
+  function maxIndex(arr){
+    if (!arr || !arr.length) return -1;
+    let idx = 0;
+    let max = safeNum(arr[0]);
+    for (let i = 1; i < arr.length; i++){
+      const v = safeNum(arr[i]);
+      if (v > max){
+        max = v;
+        idx = i;
+      }
+    }
+    return idx;
+  }
+
+  function humanPeriodLabel(key){
+    if (key === "today") return "Сегодня";
+    if (key === "yesterday") return "Вчера";
+    if (key === "week") return "Последние 7 дней";
+    if (key === "30d") return "Последние 30 дней";
+    return key || "—";
+  }
+
+  function toRuDateTime(str){
+    if (!str) return "—";
+    const normalized = String(str).replace(" ", "T");
+    const d = new Date(normalized);
+    if (isNaN(d.getTime())) return str;
+    return d.toLocaleString("ru-RU");
+  }
+
+  function shortLabel(label){
+    if (!label) return "";
+    if (label.length > 16 && label.indexOf(" ") > -1){
+      return label.slice(5);
+    }
+    return label;
+  }
+
+  function renderSummary(items){
+    elSummaryList.innerHTML = items.map(item => (
+      '<div class="ymdash-summary__item">' +
+        '<div class="ymdash-summary__title">' + item.title + '</div>' +
+        '<div class="ymdash-summary__text">' + item.text + '</div>' +
+      '</div>'
+    )).join("");
+  }
+
+  function renderSegmentTable(buckets){
+    if (!buckets || !buckets.length){
+      elSegmentTableBody.innerHTML = '<tr><td colspan="3">Нет данных</td></tr>';
+      return;
+    }
+
+    elSegmentTableBody.innerHTML = buckets.map(b => (
+      "<tr>" +
+        "<td><span class='ymdash-pill'>" + escapeHtml(b.label || "—") + "</span></td>" +
+        "<td>" + formatInt(b.count) + "</td>" +
+        "<td>" + formatPct(b.pct) + "</td>" +
+      "</tr>"
+    )).join("");
+  }
+
+  function escapeHtml(str){
+    return String(str)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function chartOptionsBase(){
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: {
+            color: "#475467",
+            boxWidth: 14,
+            usePointStyle: true,
+            pointStyle: "circle",
+            padding: 18,
+            font: { size: 12, weight: "600" }
+          }
+        },
+        tooltip: {
+          backgroundColor: "#101828",
+          titleColor: "#ffffff",
+          bodyColor: "#ffffff",
+          padding: 10,
+          displayColors: true
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: "#667085", maxRotation: 0, autoSkip: true },
+          grid: { color: "rgba(16,24,40,0.05)" }
+        },
+        y: {
+          beginAtZero: true,
+          ticks: { color: "#667085" },
+          grid: { color: "rgba(16,24,40,0.07)" }
+        }
+      }
+    };
+  }
+
+  async function loadData(){
+    const period = (elPeriod.value || "today").trim();
+
+    setStatus("Загружаю данные…");
+    elReload.disabled = true;
+
+    try{
+      const [segments, load] = await Promise.all([
+        apiGet("/admin/api/segments", {}),
+        apiGet("/admin/api/load", { period })
+      ]);
+
+      if (!segments?.ok) throw new Error("Bad payload: segments");
+      if (!load?.ok) throw new Error("Bad payload: load");
+
+      const totals = load.totals || {};
+      const timeseries = load.timeseries || {};
+      const hourly = load.hourly || {};
+      const p = load.period || {};
+
+      const createdTotal = safeNum(totals.created_total);
+      const reservedTotal = safeNum(totals.reserved_total);
+      const ratio = createdTotal > 0 ? (reservedTotal / createdTotal * 100) : 0;
+
+      const peakIdx = maxIndex(hourly.reserved || []);
+      const peakHourLabel = peakIdx >= 0 ? (hourly.labels?.[peakIdx] || "—") : "—";
+      const peakHourValue = peakIdx >= 0 ? safeNum(hourly.reserved?.[peakIdx]) : 0;
+
+      elKpiCreated.textContent = formatInt(createdTotal);
+      elKpiReserved.textContent = formatInt(reservedTotal);
+      elKpiRatio.textContent = formatPct(ratio);
+      elKpiPeak.textContent = peakHourLabel === "—" ? "—" : (peakHourLabel + ":00");
+
+      elKpiCreatedHint.textContent = "События CREATED за период: " + humanPeriodLabel(period);
+      elKpiReservedHint.textContent = "Брони с reservation_dt за период: " + humanPeriodLabel(period);
+      elKpiRatioHint.textContent = "Фактические / созданные: " + formatInt(reservedTotal) + " из " + formatInt(createdTotal);
+      elKpiPeakHint.textContent = peakHourValue > 0
+        ? ("Максимум фактических броней: " + formatInt(peakHourValue))
+        : "Нет выраженного пика";
+
+      elMetaRange.textContent =
+        humanPeriodLabel(period) +
+        " • " +
+        toRuDateTime(p.from) +
+        " — " +
+        toRuDateTime(p.to_exclusive);
+
+      elMetaSegments.textContent =
+        "Активные гости за 2 года • всего: " + formatInt(segments.total_guests || 0);
+
+      const reservedHourSeries = hourly.reserved || [];
+      const createdHourSeries = hourly.created || [];
+      const labelsHour = hourly.labels || [];
+
+      const createdTimeline = timeseries.created || [];
+      const reservedTimeline = timeseries.reserved || [];
+      const labelsTimeline = (timeseries.labels || []).map(shortLabel);
+
+      const timelinePeakIdx = maxIndex(reservedTimeline);
+      const timelinePeakLabel = timelinePeakIdx >= 0 ? (timeseries.labels?.[timelinePeakIdx] || "—") : "—";
+      const timelinePeakValue = timelinePeakIdx >= 0 ? safeNum(reservedTimeline?.[timelinePeakIdx]) : 0;
+
+      const createPeakIdx = maxIndex(createdTimeline);
+      const createPeakLabel = createPeakIdx >= 0 ? (timeseries.labels?.[createPeakIdx] || "—") : "—";
+      const createPeakValue = createPeakIdx >= 0 ? safeNum(createdTimeline?.[createPeakIdx]) : 0;
+
+      elMetaHourly.textContent =
+        peakHourValue > 0
+          ? ("Пиковый час фактических броней: " + peakHourLabel + ":00")
+          : "Данных недостаточно для выраженного пика";
+
+      renderSummary([
+        {
+          title: "Итог периода",
+          text: "За выбранный период создано " + formatInt(createdTotal) +
+            " бронирований, из них " + formatInt(reservedTotal) +
+            " попали в фактическую временную сетку. Текущее соотношение — " + formatPct(ratio) + "."
+        },
+        {
+          title: "Пиковое фактическое время",
+          text: timelinePeakValue > 0
+            ? ("Наиболее нагруженный слот по фактическому времени: " + timelinePeakLabel + ", всего " + formatInt(timelinePeakValue) + " броней.")
+            : "По фактическому времени в выбранном окне нет выраженного пика."
+        },
+        {
+          title: "Когда чаще создают",
+          text: createPeakValue > 0
+            ? ("Наибольшая активность по созданию броней зафиксирована в слоте " + createPeakLabel + ", всего " + formatInt(createPeakValue) + " созданий.")
+            : "По моменту создания броней в выбранном окне нет выраженного пика."
+        },
+        {
+          title: "Часовая структура",
+          text: peakHourValue > 0
+            ? ("Чаще всего брони ставят на " + peakHourLabel + ":00. Это видно по почасовому распределению reservation_dt.")
+            : "Почасовое распределение пока не формирует читаемый максимум."
+        }
+      ]);
+
+      renderSegmentTable(segments.buckets || []);
+
+      destroyChart(chartTimeline);
+      chartTimeline = new Chart(ctxTimeline, {
+        type: "line",
+        data: {
+          labels: labelsTimeline,
+          datasets: [
+            {
+              label: "Создано",
+              data: createdTimeline,
+              borderColor: "#ffcc00",
+              backgroundColor: "rgba(255,204,0,0.18)",
+              tension: 0.28,
+              fill: false,
+              pointRadius: 2,
+              pointHoverRadius: 4
+            },
+            {
+              label: "Фактическое время",
+              data: reservedTimeline,
+              borderColor: "#2f80ed",
+              backgroundColor: "rgba(47,128,237,0.18)",
+              tension: 0.28,
+              fill: false,
+              pointRadius: 2,
+              pointHoverRadius: 4
+            }
+          ]
+        },
+        options: {
+          ...chartOptionsBase(),
+          interaction: { mode: "index", intersect: false }
+        }
+      });
+
+      destroyChart(chartSegments);
+      chartSegments = new Chart(ctxSegments, {
+        type: "doughnut",
+        data: {
+          labels: (segments.buckets || []).map(x => x.label),
+          datasets: [{
+            data: (segments.buckets || []).map(x => safeNum(x.count)),
+            backgroundColor: [
+              "#2f80ed",
+              "#56ccf2",
+              "#27ae60",
+              "#f2c94c",
+              "#f2994a",
+              "#eb5757"
+            ],
+            borderColor: "#ffffff",
+            borderWidth: 3,
+            hoverOffset: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
+              position: "bottom",
+              labels: {
+                color: "#475467",
+                boxWidth: 12,
+                padding: 16,
+                font: { size: 12, weight: "600" }
+              }
+            },
+            tooltip: {
+              backgroundColor: "#101828",
+              titleColor: "#ffffff",
+              bodyColor: "#ffffff",
+              callbacks: {
+                label: function(ctx){
+                  const i = ctx.dataIndex;
+                  const bucket = segments.buckets?.[i] || {};
+                  return " " + (bucket.label || "") + ": " + formatInt(bucket.count) + " (" + formatPct(bucket.pct) + ")";
+                }
+              }
+            }
+          }
+        }
+      });
+
+      destroyChart(chartHourly);
+      chartHourly = new Chart(ctxHourly, {
+        type: "bar",
+        data: {
+          labels: labelsHour,
+          datasets: [
+            {
+              label: "Создано",
+              data: createdHourSeries,
+              backgroundColor: "rgba(255,204,0,0.72)",
+              borderRadius: 6
+            },
+            {
+              label: "Фактическое время",
+              data: reservedHourSeries,
+              backgroundColor: "rgba(47,128,237,0.78)",
+              borderRadius: 6
+            }
+          ]
+        },
+        options: {
+          ...chartOptionsBase(),
+          interaction: { mode: "index", intersect: false }
+        }
+      });
+
+      setStatus("Обновлено: " + new Date().toLocaleString("ru-RU"));
+    } catch(err){
+      setStatus("Ошибка загрузки: " + (err && err.message ? err.message : String(err)));
+    } finally {
+      elReload.disabled = false;
+    }
+  }
+
+  elReload.addEventListener("click", loadData);
+  elPeriod.addEventListener("change", loadData);
+
+  elPeriod.value = "today";
+  loadData();
+})();
+</script>
