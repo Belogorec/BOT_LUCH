@@ -189,6 +189,8 @@ def init_schema(conn: sqlite3.Connection):
 
     _ensure_column(conn, "guests", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "bookings", "user_chat_id", "TEXT")
+    _ensure_column(conn, "tg_bot_users", "has_shared_phone", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "tg_bot_users", "phone_e164", "TEXT")
 
 
 def rebuild_guests_from_visits(conn: sqlite3.Connection):
