@@ -1,5 +1,6 @@
 import os
 import json
+import csv
 import sqlite3
 from contextlib import contextmanager
 
@@ -7,10 +8,10 @@ DB_PATH = os.environ.get("DB_PATH", "./data/luchbar.db").strip()
 
 
 def connect():
-  # Ensure parent directory exists for file-based SQLite DB path.
-  db_dir = os.path.dirname(DB_PATH)
-  if db_dir:
-    os.makedirs(db_dir, exist_ok=True)
+    # Ensure parent directory exists for file-based SQLite DB path.
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -187,6 +188,7 @@ def init_schema(conn: sqlite3.Connection):
     )
 
     _ensure_column(conn, "guests", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(conn, "bookings", "user_chat_id", "TEXT")
 
 
 def rebuild_guests_from_visits(conn: sqlite3.Connection):
@@ -253,3 +255,41 @@ def set_tags(conn: sqlite3.Connection, phone_e164: str, tags: list[str]):
         "UPDATE guests SET tags_json=?, updated_at=datetime('now') WHERE phone_e164=?",
         (json.dumps(tags_norm, ensure_ascii=False), phone_e164),
     )
+
+
+def seed_discount_codes_from_csv(conn: sqlite3.Connection, csv_path: str | None = None) -> int:
+  """
+  Загружает promo-коды из CSV в таблицу discount_codes.
+  CSV ожидается в формате: code,qr_link[,discount_percent].
+  Возвращает количество добавленных строк.
+  """
+  if not csv_path:
+    csv_path = os.path.join(os.path.dirname(__file__), "discount_qr_codes.csv")
+
+  if not os.path.exists(csv_path):
+    return 0
+
+  before = conn.execute("SELECT COUNT(*) AS c FROM discount_codes").fetchone()
+  before_count = int(before["c"] or 0) if before else 0
+
+  with open(csv_path, "r", encoding="utf-8", newline="") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+      code = str((row or {}).get("code") or "").strip().upper()
+      if not code:
+        continue
+
+      raw_discount = str((row or {}).get("discount_percent") or "").strip()
+      discount_percent = int(raw_discount) if raw_discount.isdigit() else 15
+
+      conn.execute(
+        """
+        INSERT OR IGNORE INTO discount_codes (code, discount_percent, status)
+        VALUES (?, ?, 'ACTIVE')
+        """,
+        (code, discount_percent),
+      )
+
+  after = conn.execute("SELECT COUNT(*) AS c FROM discount_codes").fetchone()
+  after_count = int(after["c"] or 0) if after else 0
+  return max(0, after_count - before_count)

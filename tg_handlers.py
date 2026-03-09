@@ -48,7 +48,7 @@ from booking_dialog import (
     STATE_AWAITING_CONTACT,
     STATE_AWAITING_QUESTION,
 )
-from db import connect, init_schema
+from db import connect, init_schema, seed_discount_codes_from_csv
 
 
 def _h(s: str) -> str:
@@ -107,9 +107,9 @@ def tg_webhook_impl():
                     tg_answer_callback(cq_id, "")
                     tg_send_message(
                         chat_id,
-                        "📅 <b>Ближайшие события</b>\n\n"
-                        "Информация об ereignях будет добавлена вскоре.\n\n"
-                        "Следите за обновлениями!"
+                        "📅 <b>События LUCHBAR</b>\n\n"
+                        "Актуальная информация на сайте:\n"
+                        "http://barluch.ru/"
                     )
 
                 elif action == "pdf":
@@ -117,14 +117,14 @@ def tg_webhook_impl():
                     tg_send_message(
                         chat_id,
                         "📋 <b>Меню ресторана</b>\n\n"
-                        "Меню будет доступно вскоре.\n\n"
-                        "Приносим извинения за временные неудобства!"
+                        "Открыть меню:\n"
+                        "http://barluch.ru/qr-menu"
                     )
 
                 return {"ok": True}
 
             if data.startswith("promo:redeem:"):
-                code = data.replace("promo:redeem:", "", 1).strip()
+                code = data.replace("promo:redeem:", "", 1).strip().upper()
 
                 if actor_id not in PROMO_ADMIN_IDS:
                     tg_answer_callback(cq_id, "Нет доступа")
@@ -134,6 +134,13 @@ def tg_webhook_impl():
                     "SELECT code, status FROM discount_codes WHERE code=?",
                     (code,),
                 ).fetchone()
+
+                if not row:
+                    seed_discount_codes_from_csv(conn)
+                    row = conn.execute(
+                        "SELECT code, status FROM discount_codes WHERE code=?",
+                        (code,),
+                    ).fetchone()
 
                 if not row:
                     tg_answer_callback(cq_id, "Карта не найдена")
@@ -158,6 +165,24 @@ def tg_webhook_impl():
                 tg_answer_callback(cq_id, "Скидка проведена")
                 tg_send_message(chat_id, f"✅ Скидка по карте <b>{_h(code)}</b> проведена.")
                 return {"ok": True}
+
+            # Кнопка вопроса у пользователя: booking:{id}:question
+            if data.startswith("booking:") and not data.startswith("booking:confirm_"):
+                parts = data.split(":")
+                if len(parts) >= 3 and parts[2] == "question":
+                    booking_id = int(parts[1])
+                    save_dialog_state(
+                        conn,
+                        chat_id,
+                        actor_id,
+                        STATE_AWAITING_QUESTION,
+                        {"booking_id": booking_id},
+                        "0"
+                    )
+                    msg_text, markup = ask_question(chat_id, actor_id)
+                    tg_send_message(chat_id, msg_text, markup)
+                    tg_answer_callback(cq_id, "Введите ваш вопрос")
+                    return {"ok": True}
 
             parts = data.split(":")
             if len(parts) >= 3 and parts[0] == "b":
@@ -207,13 +232,15 @@ def tg_webhook_impl():
 
                         # Получаем данные брони
                         b = conn.execute(
-                            "SELECT name, phone_e164, reservation_date, reservation_time, guests_count, telegram_chat_id FROM bookings WHERE id=?",
+                            "SELECT name, phone_e164, reservation_date, reservation_time, guests_count, user_chat_id, telegram_chat_id FROM bookings WHERE id=?",
                             (booking_id,)
                         ).fetchone()
 
                         # Отправляем финальное подтверждение пользователю
-                        if b and b["telegram_chat_id"]:
-                            user_chat_id = str(b["telegram_chat_id"])
+                        user_chat_id = ""
+                        if b:
+                            user_chat_id = str((b["user_chat_id"] or b["telegram_chat_id"] or "")).strip()
+                        if user_chat_id:
                             final_msg, final_kb = booking_confirmed_final_message(
                                 b["name"] or "Гость",
                                 b["reservation_date"] or "—",
@@ -329,10 +356,10 @@ def tg_webhook_impl():
                         """
                         INSERT INTO bookings
                           (name, phone_e164, reservation_date, reservation_time, reservation_dt,
-                           guests_count, status, telegram_chat_id, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, 'WAITING', ?, datetime('now'), datetime('now'))
+                                    guests_count, status, telegram_chat_id, user_chat_id, created_at, updated_at)
+                                VALUES (?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, datetime('now'), datetime('now'))
                         """,
-                        (name, phone, date, time, reservation_dt, guests_count, chat_id)
+                                (name, phone, date, time, reservation_dt, guests_count, chat_id, chat_id)
                     )
                     booking_id = cursor.lastrowid
 
@@ -452,12 +479,19 @@ def tg_webhook_impl():
                 )
 
                 if start_param.startswith("promo_"):
-                    code = start_param.replace("promo_", "", 1).strip()
+                    code = start_param.replace("promo_", "", 1).strip().upper()
 
                     row = conn.execute(
                         "SELECT code, status FROM discount_codes WHERE code=?",
                         (code,),
                     ).fetchone()
+
+                    if not row:
+                        seed_discount_codes_from_csv(conn)
+                        row = conn.execute(
+                            "SELECT code, status FROM discount_codes WHERE code=?",
+                            (code,),
+                        ).fetchone()
 
                     if not row:
                         tg_send_message(chat_id, "❌ Эта подарочная карта не найдена.")
@@ -767,12 +801,15 @@ def tg_webhook_impl():
                 
                 # Получаем данные брони (где chat_id пользователя)
                 b = conn.execute(
-                    "SELECT telegram_chat_id FROM bookings WHERE id=?",
+                    "SELECT user_chat_id, telegram_chat_id FROM bookings WHERE id=?",
                     (booking_id,),
                 ).fetchone()
 
-                if b and b["telegram_chat_id"]:
-                    user_chat_id = str(b["telegram_chat_id"])
+                user_chat_id = ""
+                if b:
+                    user_chat_id = str((b["user_chat_id"] or b["telegram_chat_id"] or "")).strip()
+
+                if user_chat_id:
                     admin_answer_text = (
                         f"💬 <b>Ответ на ваш вопрос по бронированию #{booking_id}</b>\n\n"
                         f"{_h(text)}\n\n"
