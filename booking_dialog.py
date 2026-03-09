@@ -168,9 +168,43 @@ def ask_phone(chat_id: str, user_id: str) -> Tuple[str, dict]:
     return text, {"force_reply": True}
 
 
+def get_existing_user_data(conn, user_id: str) -> Optional[Tuple[str, str]]:
+    """Проверяет есть ли у пользователя предыдущие бронирования и возвращает имя и телефон."""
+    row = conn.execute(
+        """
+        SELECT name, phone_e164
+        FROM bookings
+        WHERE user_chat_id=? OR telegram_chat_id=?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (user_id, user_id),
+    ).fetchone()
+    
+    if row and row["phone_e164"]:
+        return row["name"] or "", row["phone_e164"]
+    
+    return None
+
+
 def start_booking_dialog(conn, chat_id: str, user_id: str, user_name: str) -> Tuple[str, dict]:
     """Начинает диалог приема бронирования с запроса контактов."""
-    # Сразу просим поделиться контактом через встроенную кнопку Telegram
+    # Проверяем есть ли у пользователя предыдущие бронирования
+    existing_data = get_existing_user_data(conn, user_id)
+    
+    if existing_data:
+        # Пользователь уже бронировал раньше - пропускаем запрос контактов
+        name, phone = existing_data
+        greeting_name = name.split()[0] if name else "снова"
+        text = (
+            f"👋 Привет, {greeting_name}!\n\n"
+            "Рад видеть вас снова. Давайте забронируем стол.\n\n"
+            "Когда вы хотите забронировать стол? 📅\n\n"
+            "Пожалуйста, укажите дату (например: 25.03 или 25.03.2026)"
+        )
+        return text, {"force_reply": True}
+    
+    # Новый пользователь - сразу просим поделиться контактом через встроенную кнопку Telegram
     return ask_for_contact(chat_id, user_id)
 
 

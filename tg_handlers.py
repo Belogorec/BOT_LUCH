@@ -1,5 +1,5 @@
-import json
 import html
+import json
 from datetime import datetime, timedelta
 
 from flask import request, abort
@@ -17,38 +17,7 @@ from booking_service import (
     mark_booking_cancelled,
 )
 from booking_render import render_booking_card
-from booking_dialog import (
-    start_booking_dialog,
-    get_dialog_state,
-    clear_dialog_state,
-    save_dialog_state,
-    ask_name,
-    ask_phone,
-    ask_for_contact,
-    ask_date,
-    ask_time,
-    ask_guests_count,
-    confirm_booking,
-    normalize_phone,
-    validate_date,
-    validate_time,
-    validate_guests_count,
-    extract_phone_from_contact,
-    extract_name_from_contact,
-    ask_question,
-    save_booking_question,
-    booking_confirmed_user_message,
-    booking_confirmed_final_message,
-    STATE_AWAITING_NAME,
-    STATE_AWAITING_PHONE,
-    STATE_AWAITING_DATE,
-    STATE_AWAITING_TIME,
-    STATE_AWAITING_GUESTS_COUNT,
-    STATE_AWAITING_CONFIRMATION,
-    STATE_AWAITING_CONTACT,
-    STATE_AWAITING_QUESTION,
-)
-from db import connect, init_schema, seed_discount_codes_from_csv
+from db import connect, init_schema
 
 
 def _h(s: str) -> str:
@@ -85,6 +54,339 @@ def tg_webhook_impl():
             chat_id = str(chat.get("id") or "")
             message_id = str(msg.get("message_id") or "")
 
+            if data.startswith("promo:redeem:"):
+                code = data.replace("promo:redeem:", "", 1).strip()
+
+                if actor_id not in PROMO_ADMIN_IDS:
+                    tg_answer_callback(cq_id, "Нет доступа")
+                    return {"ok": True}
+
+                row = conn.execute(
+                    "SELECT code, status FROM discount_codes WHERE code=?",
+                    (code,),
+                ).fetchone()
+
+                if not row:
+                    tg_answer_callback(cq_id, "Карта не найдена")
+                    return {"ok": True}
+
+                if row["status"] == "USED":
+                    tg_answer_callback(cq_id, "Карта уже использована")
+                    tg_send_message(chat_id, f"❌ Карта <b>{_h(code)}</b> уже была использована ранее.")
+                    return {"ok": True}
+
+                conn.execute(
+                    """
+                    UPDATE discount_codes
+                    SET status='USED',
+                        redeemed_at=datetime('now'),
+                        redeemed_by_tg_id=?
+                    WHERE code=? AND status='ACTIVE'
+                    """,
+                    (actor_id, code),
+                )
+
+                tg_answer_callback(cq_id, "Скидка проведена")
+                tg_send_message(chat_id, f"✅ Скидка по карте <b>{_h(code)}</b> проведена.")
+                return {"ok": True}
+
+            parts = data.split(":")
+            if len(parts) >= 3 and parts[0] == "b":
+                booking_id = int(parts[1])
+
+                b = conn.execute("SELECT id, phone_e164 FROM bookings WHERE id=?", (booking_id,)).fetchone()
+                if not b:
+                    tg_answer_callback(cq_id, "Бронь не найдена")
+                    return {"ok": True}
+
+                phone = b["phone_e164"] or ""
+                if phone:
+                    upsert_guest_if_missing(conn, phone, "")
+
+                if parts[2] == "tag" and len(parts) >= 4:
+                    tag = parts[3].strip().upper()
+                    if not phone:
+                        tg_answer_callback(cq_id, "Нет телефона у брони")
+                        return {"ok": True}
+
+                    tags2, action = toggle_guest_tag(conn, phone, tag)
+                    log_guest_event(conn, phone, action, actor_id, actor_name, {"tag": tag})
+
+                    g_row = conn.execute("SELECT visits_count FROM guests WHERE phone_e164=?", (phone,)).fetchone()
+                    visits_count = int(g_row["visits_count"] or 0) if g_row else 0
+                    seg = compute_segment(visits_count, tags2)
+                    conn.execute("UPDATE bookings SET guest_segment=?, updated_at=datetime('now') WHERE id=?", (seg, booking_id))
+
+                    text, kb = render_booking_card(conn, booking_id)
+                    tg_edit_message(chat_id, message_id, text, kb)
+                    tg_answer_callback(cq_id, "Готово")
+                    return {"ok": True}
+
+                if parts[2] == "booking" and len(parts) >= 4:
+                    action = parts[3].strip().lower()
+
+                    if action == "confirm":
+                        conn.execute("UPDATE bookings SET status='CONFIRMED', updated_at=datetime('now') WHERE id=?", (booking_id,))
+                        log_booking_event(conn, booking_id, "CONFIRMED", actor_id, actor_name, {})
+                        ensure_visit_from_confirmed_booking(conn, booking_id, actor_id, actor_name)
+
+                        text, kb = render_booking_card(conn, booking_id)
+                        tg_edit_message(chat_id, message_id, text, kb)
+                        tg_answer_callback(cq_id, "Подтверждено")
+                        return {"ok": True}
+
+                    if action == "cancel":
+                        mark_booking_cancelled(conn, booking_id, actor_id, actor_name)
+                        text, kb = render_booking_card(conn, booking_id)
+                        tg_edit_message(chat_id, message_id, text, kb)
+                        tg_answer_callback(cq_id, "Отменено")
+                        return {"ok": True}
+
+                if parts[2] == "note":
+                    if not phone:
+                        tg_answer_callback(cq_id, "Нет телефона у брони")
+                        return {"ok": True}
+
+                    prompt_text = (
+                        "<b>Комментарий к гостю</b>\n"
+                        f"Бронь #{booking_id}\n"
+                        f"Телефон: <a href=\"tel:{_h(phone)}\">{_h(phone)}</a>\n\n"
+                        "Напишите следующим сообщением текст комментария. Можно без reply, в течение 10 минут."
+                    )
+
+                    prompt_markup = {"force_reply": True, "selective": True}
+                    prompt_msg_id = tg_send_message(chat_id, prompt_text, reply_markup=prompt_markup)
+
+                    expires = (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds")
+                    conn.execute(
+                        """
+                        INSERT INTO pending_replies (kind, booking_id, phone_e164, chat_id, actor_tg_id, prompt_message_id, expires_at)
+                        VALUES ('guest_note', ?, ?, ?, ?, ?, ?)
+                        """,
+                        (booking_id, phone, chat_id, actor_id, str(prompt_msg_id), expires),
+                    )
+
+                    tg_answer_callback(cq_id, "Ожидаю текст")
+                    return {"ok": True}
+
+            tg_answer_callback(cq_id)
+            return {"ok": True}
+
+        if "message" in update:
+            m = update["message"] or {}
+            chat = m.get("chat") or {}
+            chat_id = str(chat.get("id") or "")
+            from_ = m.get("from") or {}
+            actor_id = str(from_.get("id") or "")
+            actor_name = (from_.get("username") or from_.get("first_name") or "").strip()
+
+            web_app_data = (m.get("web_app_data") or {}).get("data")
+            if web_app_data:
+                try:
+                    payload = json.loads(str(web_app_data))
+                except Exception:
+                    tg_send_message(chat_id, "Не удалось прочитать данные формы. Попробуйте ещё раз.")
+                    return {"ok": True}
+
+                date_value = str(payload.get("date") or "").strip()
+                time_value = str(payload.get("time") or "").strip()
+                guests_value = str(payload.get("guests") or "").strip()
+                comment_value = str(payload.get("comment") or "").strip()
+
+                if not date_value or not time_value or not guests_value:
+                    tg_send_message(chat_id, "Форма заполнена не полностью. Откройте её ещё раз.")
+                    return {"ok": True}
+
+                user_text = (
+                    "✅ <b>Запрос на бронь принят</b>\n\n"
+                    f"Дата: <b>{_h(date_value)}</b>\n"
+                    f"Время: <b>{_h(time_value)}</b>\n"
+                    f"Гостей: <b>{_h(guests_value)}</b>\n"
+                )
+                if comment_value:
+                    user_text += f"Комментарий: {_h(comment_value)}\n"
+                user_text += "\nСкоро с вами свяжемся."
+
+                admin_text = (
+                    "🆕 <b>Новая заявка из Telegram Mini App</b>\n\n"
+                    f"Пользователь: <b>{_h(actor_name or 'Без имени')}</b>\n"
+                    f"TG ID: <code>{_h(actor_id)}</code>\n"
+                    f"Дата: <b>{_h(date_value)}</b>\n"
+                    f"Время: <b>{_h(time_value)}</b>\n"
+                    f"Гостей: <b>{_h(guests_value)}</b>\n"
+                )
+                if comment_value:
+                    admin_text += f"Комментарий: {_h(comment_value)}\n"
+
+                tg_send_message(chat_id, user_text)
+                tg_send_message(str(TG_CHAT_ID), admin_text)
+                return {"ok": True}
+
+            text = (m.get("text") or "").strip()
+
+            if text.startswith("/start"):
+                parts = text.split()
+
+                if len(parts) > 1 and parts[1].startswith("promo_"):
+                    code = parts[1].replace("promo_", "").strip()
+
+                    row = conn.execute(
+                        "SELECT code, status FROM discount_codes WHERE code=?",
+                        (code,),
+                    ).fetchone()
+
+                    if not row:
+                        tg_send_message(chat_id, "❌ Эта подарочная карта не найдена.")
+                        return {"ok": True}
+
+                    status = row["status"]
+
+                    if status == "USED":
+                        tg_send_message(chat_id, "❌ Эта подарочная карта уже была использована.")
+                        return {"ok": True}
+
+                    text_msg = (
+                        "🎁 <b>Подарочная карта LUCHBAR</b>\n\n"
+                        "Ваша карта активна.\n\n"
+                        "Скидка: <b>15%</b>\n"
+                        "Действует до: <b>31 мая</b>\n\n"
+                        "Вы можете воспользоваться скидкой "
+                        "один раз, предъявив открытку с QR-кодом официанту.\n\n"
+                        "Будем рады видеть вас в LUCHBAR."
+                    )
+
+                    inline_rows = [
+                        [
+                            {
+                                "text": "🍸 Забронировать стол",
+                                "url": "https://barluch.ru/reserve"
+                            }
+                        ]
+                    ]
+
+                    if actor_id in PROMO_ADMIN_IDS:
+                        inline_rows.append(
+                            [
+                                {
+                                    "text": "✅ Провести скидку",
+                                    "callback_data": f"promo:redeem:{code}"
+                                }
+                            ]
+                        )
+
+                    kb = {"inline_keyboard": inline_rows}
+                    tg_send_message(chat_id, text_msg, kb)
+                    return {"ok": True}
+
+                start_text = (
+                    "🍸 <b>LUCHBAR</b>\n\n"
+                    "Откройте форму бронирования прямо внутри Telegram.\n"
+                    "Там можно выбрать дату, время, количество гостей и комментарий."
+                )
+                start_kb = {
+                    "keyboard": [
+                        [
+                            {
+                                "text": "Открыть форму брони",
+                                "web_app": {
+                                    "url": "https://botluch-production.up.railway.app/miniapp/reserve"
+                                }
+                            }
+                        ]
+                    ],
+                    "resize_keyboard": True,
+                    "one_time_keyboard": True
+                }
+                tg_send_message(chat_id, start_text, start_kb)
+                return {"ok": True}
+
+            if not text:
+                return {"ok": True}
+
+            reply_to = m.get("reply_to_message")
+            prompt_mid = str(reply_to.get("message_id") or "") if reply_to else ""
+
+            row = None
+
+            if prompt_mid:
+                row = conn.execute(
+                    """
+                    SELECT id, booking_id, phone_e164, expires_at
+                    FROM pending_replies
+                    WHERE chat_id=? AND prompt_message_id=? AND actor_tg_id=? AND kind='guest_note'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (chat_id, prompt_mid, actor_id),
+                ).fetchone()
+
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT id, booking_id, phone_e164, expires_at
+                    FROM pending_replies
+                    WHERE chat_id=? AND actor_tg_id=? AND kind='guest_note'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (chat_id, actor_id),
+                ).fetchone()
+
+            if not row:
+                return {"ok": True}
+
+            try:
+                exp = datetime.fromisoformat(str(row["expires_at"]))
+                if datetime.utcnow() > exp:
+                    conn.execute("DELETE FROM pending_replies WHERE id=?", (row["id"],))
+                    return {"ok": True}
+            except Exception:
+                pass
+
+            booking_id = int(row["booking_id"])
+            phone = str(row["phone_e164"] or "")
+
+            add_guest_note(conn, phone, text, actor_id, actor_name)
+            conn.execute("DELETE FROM pending_replies WHERE id=?", (row["id"],))
+
+            b = conn.execute(
+                "SELECT telegram_chat_id, telegram_message_id FROM bookings WHERE id=?",
+                (booking_id,),
+            ).fetchone()
+            if b and b["telegram_chat_id"] and b["telegram_message_id"]:
+                card_text, kb = render_booking_card(conn, booking_id)
+                tg_edit_message(str(b["telegram_chat_id"]), str(b["telegram_message_id"]), card_text, kb)
+
+            tg_send_message(chat_id, "Сохранён в базе.")
+            return {"ok": True}
+
+        return {"ok": True}
+    finally:
+        conn.commit()
+        conn.close()
+
+
+def tg_webhook_impl_OLD_BACKUP():
+    if TG_WEBHOOK_SECRET:
+        hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if hdr != TG_WEBHOOK_SECRET:
+            abort(403)
+
+    update = request.get_json(silent=True) or {}
+
+    conn = ensure_db()
+    try:
+        if "callback_query" in update:
+            cq = update["callback_query"] or {}
+            cq_id = str(cq.get("id") or "")
+            data = str(cq.get("data") or "")
+            actor = cq.get("from") or {}
+            actor_id = str(actor.get("id") or "")
+            actor_name = (actor.get("username") or actor.get("first_name") or "").strip()
+
+            msg = cq.get("message") or {}
+            chat = msg.get("chat") or {}
+            chat_id = str(chat.get("id") or "")
+            message_id = str(msg.get("message_id") or "")
+
             # ===== Обработка меню кнопок =====
             if data.startswith("menu:"):
                 action = data.replace("menu:", "", 1).strip()
@@ -93,14 +395,32 @@ def tg_webhook_impl():
                     # Начинаем диалог бронирования
                     msg_text, markup = start_booking_dialog(conn, chat_id, actor_id, actor_name)
                     prompt_msg_id = tg_send_message(chat_id, msg_text, reply_markup=markup)
-                    save_dialog_state(
-                        conn,
-                        chat_id,
-                        actor_id,
-                        STATE_AWAITING_CONTACT,
-                        {},
-                        prompt_msg_id or "0"
-                    )
+                    
+                    # Проверяем есть ли у пользователя данные из предыдущих броней
+                    existing_data = get_existing_user_data(conn, actor_id)
+                    
+                    if existing_data:
+                        # Возвращающийся пользователь - сохраняем его данные и начинаем с даты
+                        name, phone = existing_data
+                        save_dialog_state(
+                            conn,
+                            chat_id,
+                            actor_id,
+                            STATE_AWAITING_DATE,
+                            {"name": name, "phone_e164": phone},
+                            prompt_msg_id or "0"
+                        )
+                    else:
+                        # Новый пользователь - начинаем с запроса контактов
+                        save_dialog_state(
+                            conn,
+                            chat_id,
+                            actor_id,
+                            STATE_AWAITING_CONTACT,
+                            {},
+                            prompt_msg_id or "0"
+                        )
+                    
                     tg_answer_callback(cq_id, "Открыт диалог бронирования")
 
                 elif action == "events":
@@ -108,8 +428,8 @@ def tg_webhook_impl():
                     tg_send_message(
                         chat_id,
                         "📅 <b>События LUCHBAR</b>\n\n"
-                        "Актуальная информация на сайте:\n"
-                        "http://barluch.ru/"
+                        "Актуальная информация о мероприятиях:\n"
+                        "👉 <a href=\"http://barluch.ru/\">barluch.ru</a>"
                     )
 
                 elif action == "pdf":
@@ -117,8 +437,8 @@ def tg_webhook_impl():
                     tg_send_message(
                         chat_id,
                         "📋 <b>Меню ресторана</b>\n\n"
-                        "Открыть меню:\n"
-                        "http://barluch.ru/qr-menu"
+                        "Посмотреть меню:\n"
+                        "👉 <a href=\"http://barluch.ru/qr-menu\">barluch.ru/qr-menu</a>"
                     )
 
                 return {"ok": True}
@@ -453,6 +773,21 @@ def tg_webhook_impl():
 
             text = (m.get("text") or "").strip()
 
+            if text == "/myid":
+                is_admin = actor_id in PROMO_ADMIN_IDS
+                admins_preview = ", ".join(PROMO_ADMIN_IDS[:10]) if PROMO_ADMIN_IDS else "(пусто)"
+                tg_send_message(
+                    chat_id,
+                    "\n".join([
+                        "<b>Профиль Telegram</b>",
+                        f"ID: <code>{_h(actor_id)}</code>",
+                        f"username: @{_h(username) if username else '—'}",
+                        f"PROMO_ADMIN_IDS (загружено): <code>{_h(admins_preview)}</code>",
+                        f"admin доступ QR: <b>{'ДА' if is_admin else 'НЕТ'}</b>",
+                    ])
+                )
+                return {"ok": True}
+
             if text.startswith("/start"):
                 parts = text.split()
                 start_param = parts[1].strip() if len(parts) > 1 else ""
@@ -730,17 +1065,21 @@ def tg_webhook_impl():
                     save_booking_question(conn, booking_id, "", question, chat_id, actor_id)
 
                     # Отправляем вопрос в админский чат
+                    if not TG_CHAT_ID:
+                        tg_send_message(chat_id, "❌ Ошибка конфигурации: админский чат не настроен")
+                        return {"ok": True}
+
                     try:
                         admin_question_text = (
                             f"❓ <b>Вопрос по бронированию #{booking_id}</b>\n\n"
-                            f"<b>От пользователя:</b> {actor_name or 'Неизвестный'}\n\n"
-                            f"<b>Вопрос:</b>\n{_h(question)}\n\n"
-                            "Ответьте reply-ом на это сообщение чтобы ответить пользователю (анонимно)."
+                            f"<b>От пользователя:</b> {actor_name or 'Неизвестный'} (ID: {actor_id})\n"
+                            f"<b>Чат:</b> {chat_id}\n\n"
+                            f"<b>Вопрос:</b>\n{_h(question)}"
                         )
                         admin_kb = {
                             "inline_keyboard": [
                                 [
-                                    {"text": "↩️ Ответить", "callback_data": f"booking:{booking_id}:answer_question"}
+                                    {"text": "↩️ Ответить", "callback_data": f"b:{booking_id}:answer_question"}
                                 ]
                             ]
                         }
