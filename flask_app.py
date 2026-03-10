@@ -88,173 +88,500 @@ def miniapp_reserve():
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+  />
   <title>LUCHBAR • Бронирование</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root{
-      --bg:#0f0f10;
-      --card:#1b1b1d;
-      --line:#2e2e33;
+      --bg:#0a0a0a;
+      --card:#121212;
+      --stroke:rgba(255,255,255,.08);
       --text:#f5f5f5;
-      --muted:#a3a3ad;
-      --accent:#ff8562;
+      --muted:rgba(255,255,255,.62);
+      --accent:#c79a2b;
+      --accent-2:#e0b54b;
+      --danger:#ff6b6b;
+      --ok:#61d095;
+      --radius:18px;
+      --shadow:0 18px 50px rgba(0,0,0,.28);
     }
-    *{box-sizing:border-box}
-    body{
+
+    *{ box-sizing:border-box; }
+    html,body{
       margin:0;
+      padding:0;
+      width:100%;
+      max-width:100%;
+      overflow-x:hidden;
       background:var(--bg);
       color:var(--text);
-      font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      -webkit-text-size-adjust:100%;
     }
-    .wrap{
-      max-width:720px;
-      margin:0 auto;
-      padding:20px 16px 28px;
+
+    body{
+      min-height:100vh;
+      min-height:100dvh;
     }
-    .card{
-      background:var(--card);
-      border:1px solid var(--line);
-      border-radius:18px;
-      padding:16px;
-      box-shadow:0 10px 30px rgba(0,0,0,.22);
-    }
-    h1{
-      margin:0 0 8px;
-      font-size:24px;
-      line-height:1.15;
-    }
-    .sub{
-      margin:0 0 18px;
-      color:var(--muted);
-      font-size:14px;
-    }
-    label{
-      display:block;
-      margin:14px 0 6px;
-      font-size:14px;
-      color:var(--muted);
-    }
-    input,select,textarea,button{
+
+    .page{
       width:100%;
-      border-radius:12px;
-      border:1px solid var(--line);
-      background:#111214;
-      color:var(--text);
-      padding:14px 12px;
-      font-size:16px;
-      outline:none;
+      max-width:100%;
+      min-height:100vh;
+      min-height:100dvh;
+      padding:
+        max(16px, env(safe-area-inset-top))
+        14px
+        max(20px, env(safe-area-inset-bottom))
+        14px;
+      display:flex;
+      align-items:flex-start;
+      justify-content:center;
+      overflow-x:hidden;
     }
-    textarea{
-      min-height:110px;
-      resize:vertical;
+
+    .card{
+      width:min(100%, 560px);
+      min-width:0;
+      background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
+      border:1px solid var(--stroke);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:18px;
     }
-    .row{
-      display:grid;
-      grid-template-columns:1fr 1fr;
-      gap:12px;
+
+    .eyebrow{
+      color:var(--accent);
+      font-size:12px;
+      line-height:1.2;
+      letter-spacing:.16em;
+      text-transform:uppercase;
+      margin:0 0 8px 0;
     }
-    .btn{
-      margin-top:18px;
-      background:var(--accent);
-      color:#fff;
-      border:none;
-      font-weight:700;
-      cursor:pointer;
+
+    h1{
+      margin:0 0 8px 0;
+      font-size:28px;
+      line-height:1.05;
+      letter-spacing:.01em;
     }
-    .hint{
-      margin-top:12px;
-      font-size:13px;
+
+    .sub{
+      margin:0 0 18px 0;
       color:var(--muted);
+      font-size:14px;
+      line-height:1.45;
     }
-    @media (max-width:640px){
-      .row{grid-template-columns:1fr}
-      .wrap{padding:14px 12px 22px}
+
+    .grid{
+      display:grid;
+      grid-template-columns:repeat(3, minmax(0, 1fr));
+      gap:12px;
+      min-width:0;
+    }
+
+    .field{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      min-width:0;
+      width:100%;
+    }
+
+    .field--full{
+      grid-column:1 / -1;
+    }
+
+    .label{
+      font-size:12px;
+      line-height:1.2;
+      color:var(--muted);
+      letter-spacing:.06em;
+      text-transform:uppercase;
+    }
+
+    input,
+    select,
+    textarea,
+    button{
+      font:inherit;
+    }
+
+    input,
+    select,
+    textarea{
+      width:100%;
+      min-width:0;
+      max-width:100%;
+      border:1px solid rgba(255,255,255,.10);
+      background:#111;
+      color:var(--text);
+      border-radius:14px;
+      outline:none;
+      box-shadow:none;
+      appearance:none;
+      -webkit-appearance:none;
+    }
+
+    input,
+    select{
+      height:52px;
+      padding:0 14px;
+    }
+
+    textarea{
+      min-height:112px;
+      resize:vertical;
+      padding:14px;
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus{
+      border-color:rgba(199,154,43,.9);
+      box-shadow:0 0 0 3px rgba(199,154,43,.16);
+    }
+
+    .hint{
+      margin-top:14px;
+      color:var(--muted);
+      font-size:13px;
+      line-height:1.45;
+    }
+
+    .error{
+      min-height:20px;
+      margin-top:12px;
+      color:var(--danger);
+      font-size:13px;
+      line-height:1.35;
+    }
+
+    .actions{
+      margin-top:16px;
+      display:grid;
+      grid-template-columns:1fr;
+      gap:10px;
+    }
+
+    .btn{
+      width:100%;
+      min-height:54px;
+      border:none;
+      border-radius:14px;
+      background:var(--accent);
+      color:#111;
+      font-weight:700;
+      font-size:16px;
+      letter-spacing:.02em;
+      cursor:pointer;
+      transition:transform .15s ease, opacity .15s ease, background .15s ease;
+    }
+
+    .btn:active{
+      transform:translateY(1px);
+    }
+
+    .btn[disabled]{
+      opacity:.6;
+      cursor:default;
+    }
+
+    .ghost{
+      background:transparent;
+      color:var(--text);
+      border:1px solid rgba(255,255,255,.12);
+    }
+
+    .status{
+      margin-top:12px;
+      padding:12px 14px;
+      border-radius:14px;
+      font-size:14px;
+      line-height:1.4;
+      display:none;
+    }
+
+    .status.show{ display:block; }
+    .status.ok{
+      background:rgba(97,208,149,.10);
+      border:1px solid rgba(97,208,149,.24);
+      color:#baf0cf;
+    }
+    .status.bad{
+      background:rgba(255,107,107,.10);
+      border:1px solid rgba(255,107,107,.24);
+      color:#ffc4c4;
+    }
+
+    @media (max-width: 640px){
+      .page{
+        padding:
+          max(12px, env(safe-area-inset-top))
+          10px
+          max(16px, env(safe-area-inset-bottom))
+          10px;
+      }
+
+      .card{
+        width:100%;
+        padding:14px;
+        border-radius:16px;
+      }
+
+      h1{
+        font-size:24px;
+      }
+
+      .grid{
+        grid-template-columns:1fr;
+        gap:10px;
+      }
+
+      input,
+      select{
+        height:50px;
+      }
+
+      textarea{
+        min-height:104px;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="page">
     <div class="card">
-      <h1>Бронирование LUCHBAR</h1>
-      <p class="sub">Выберите дату, время и количество гостей. После отправки заявка сразу прилетит в Telegram.</p>
+      <p class="eyebrow">LUCHBAR</p>
+      <h1>Бронирование</h1>
+      <p class="sub">
+        Выберите дату, время и количество гостей. После отправки заявка уйдёт администраторам в Telegram.
+      </p>
 
-      <label for="date">Дата</label>
-      <input id="date" type="date">
+      <form id="reserveForm" novalidate>
+        <div class="grid">
+          <label class="field" for="date">
+            <span class="label">Дата</span>
+            <input type="date" id="date" name="date" required />
+          </label>
 
-      <div class="row">
-        <div>
-          <label for="time">Время</label>
-          <input id="time" type="time" step="1800">
+          <label class="field" for="time">
+            <span class="label">Время</span>
+            <input type="time" id="time" name="time" required step="300" />
+          </label>
+
+          <label class="field" for="guests">
+            <span class="label">Гостей</span>
+            <select id="guests" name="guests" required>
+              <option value="">Выберите</option>
+              <option>1</option>
+              <option>2</option>
+              <option>3</option>
+              <option>4</option>
+              <option>5</option>
+              <option>6</option>
+              <option>7</option>
+              <option>8</option>
+              <option>9</option>
+              <option>10</option>
+            </select>
+          </label>
+
+          <label class="field field--full" for="comment">
+            <span class="label">Комментарий</span>
+            <textarea
+              id="comment"
+              name="comment"
+              placeholder="Например: стол у окна, день рождения, детский стул"
+            ></textarea>
+          </label>
         </div>
-        <div>
-          <label for="guests">Гостей</label>
-          <select id="guests">
-            <option value="1">1 гость</option>
-            <option value="2" selected>2 гостя</option>
-            <option value="3">3 гостя</option>
-            <option value="4">4 гостя</option>
-            <option value="5">5 гостей</option>
-            <option value="6">6 гостей</option>
-            <option value="7">7 гостей</option>
-            <option value="8">8 гостей</option>
-            <option value="9">9 гостей</option>
-            <option value="10">10 гостей</option>
-          </select>
+
+        <div id="error" class="error"></div>
+
+        <div class="actions">
+          <button id="submitBtn" class="btn" type="submit">Отправить заявку</button>
+          <button id="closeBtn" class="btn ghost" type="button">Закрыть</button>
         </div>
-      </div>
 
-      <label for="comment">Комментарий</label>
-      <textarea id="comment" placeholder="Например: день рождения, нужен тихий стол, опаздываем на 15 минут"></textarea>
+        <div class="hint">
+          После отправки менеджер свяжется с гостем для подтверждения брони.
+        </div>
 
-      <button id="submitBtn" class="btn" type="button">Отправить заявку</button>
-      <div class="hint">Это базовая версия Mini App. Следующим шагом можно добавить автоподтягивание свободных слотов и телефона гостя.</div>
+        <div id="statusOk" class="status ok"></div>
+        <div id="statusBad" class="status bad"></div>
+      </form>
     </div>
   </div>
 
   <script>
-    const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-    if (tg) {
-      tg.ready();
-      tg.expand();
-    }
+    (function () {
+      const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 
-    const dateInput = document.getElementById("date");
-    const timeInput = document.getElementById("time");
-    const guestsInput = document.getElementById("guests");
-    const commentInput = document.getElementById("comment");
-    const submitBtn = document.getElementById("submitBtn");
-
-    const now = new Date();
-    const yyyy = now.getFullYear();
-    const mm = String(now.getMonth() + 1).padStart(2, "0");
-    const dd = String(now.getDate()).padStart(2, "0");
-    dateInput.min = `${yyyy}-${mm}-${dd}`;
-    dateInput.value = `${yyyy}-${mm}-${dd}`;
-    timeInput.value = "19:00";
-
-    submitBtn.addEventListener("click", function () {
-      const payload = {
-        source: "miniapp_reserve",
-        date: dateInput.value || "",
-        time: timeInput.value || "",
-        guests: guestsInput.value || "",
-        comment: (commentInput.value || "").trim()
-      };
-
-      if (!payload.date || !payload.time || !payload.guests) {
-        alert("Заполните дату, время и количество гостей.");
-        return;
+      if (tg) {
+        tg.ready();
+        tg.expand();
+        try {
+          tg.setHeaderColor("#0a0a0a");
+          tg.setBackgroundColor("#0a0a0a");
+        } catch (_) {}
       }
 
-      if (!tg) {
-        alert("Эту форму нужно открывать внутри Telegram.");
-        return;
+      const form = document.getElementById("reserveForm");
+      const dateInput = document.getElementById("date");
+      const timeInput = document.getElementById("time");
+      const guestsInput = document.getElementById("guests");
+      const commentInput = document.getElementById("comment");
+      const submitBtn = document.getElementById("submitBtn");
+      const closeBtn = document.getElementById("closeBtn");
+      const errorBox = document.getElementById("error");
+      const statusOk = document.getElementById("statusOk");
+      const statusBad = document.getElementById("statusBad");
+
+      function pad(n) {
+        return String(n).padStart(2, "0");
       }
 
-      tg.sendData(JSON.stringify(payload));
-      tg.close();
-    });
+      function toDateISO(d) {
+        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+      }
+
+      function toTimeHM(d) {
+        return pad(d.getHours()) + ":" + pad(d.getMinutes());
+      }
+
+      function ceilToStepMinutes(date, step) {
+        const ms = step * 60 * 1000;
+        return new Date(Math.ceil(date.getTime() / ms) * ms);
+      }
+
+      function showError(text) {
+        errorBox.textContent = text || "";
+        statusBad.className = "status bad";
+        statusBad.textContent = "";
+        statusOk.className = "status ok";
+        statusOk.textContent = "";
+      }
+
+      function showOk(text) {
+        errorBox.textContent = "";
+        statusBad.className = "status bad";
+        statusBad.textContent = "";
+        statusOk.className = "status ok show";
+        statusOk.textContent = text;
+      }
+
+      function showBad(text) {
+        errorBox.textContent = "";
+        statusOk.className = "status ok";
+        statusOk.textContent = "";
+        statusBad.className = "status bad show";
+        statusBad.textContent = text;
+      }
+
+      function applyConstraints() {
+        const now = new Date();
+        const todayISO = toDateISO(now);
+        const minDt = ceilToStepMinutes(new Date(now.getTime() + 20 * 60 * 1000), 5);
+
+        dateInput.min = todayISO;
+        if (!dateInput.value) {
+          dateInput.value = todayISO;
+        }
+
+        if (!timeInput.value) {
+          timeInput.value = toTimeHM(minDt);
+        }
+
+        if (dateInput.value === todayISO) {
+          const minTime = toTimeHM(minDt);
+          timeInput.min = minTime;
+          if (timeInput.value && timeInput.value < minTime) {
+            timeInput.value = minTime;
+          }
+        } else {
+          timeInput.min = "";
+        }
+      }
+
+      function validate() {
+        showError("");
+
+        if (!dateInput.value) {
+          showError("Выберите дату.");
+          return false;
+        }
+
+        if (!timeInput.value) {
+          showError("Выберите время.");
+          return false;
+        }
+
+        if (!guestsInput.value) {
+          showError("Выберите количество гостей.");
+          return false;
+        }
+
+        const now = new Date();
+        const minAllowed = new Date(now.getTime() + 20 * 60 * 1000);
+
+        const d = dateInput.value.split("-").map(Number);
+        const t = timeInput.value.split(":").map(Number);
+        const chosen = new Date(d[0], d[1] - 1, d[2], t[0], t[1], 0, 0);
+
+        if (chosen < minAllowed) {
+          showError("Для ближайшей брони выберите время не раньше чем через 20 минут.");
+          return false;
+        }
+
+        return true;
+      }
+
+      applyConstraints();
+      dateInput.addEventListener("change", applyConstraints);
+      timeInput.addEventListener("change", applyConstraints);
+
+      form.addEventListener("submit", function (e) {
+        e.preventDefault();
+
+        if (!validate()) {
+          return;
+        }
+
+        const payload = {
+          date: dateInput.value,
+          time: timeInput.value,
+          guests: guestsInput.value,
+          comment: (commentInput.value || "").trim()
+        };
+
+        submitBtn.disabled = true;
+
+        try {
+          if (tg && typeof tg.sendData === "function") {
+            tg.sendData(JSON.stringify(payload));
+            showOk("Заявка отправлена. Сейчас можно закрыть окно.");
+          } else {
+            showBad("Mini App открыт вне Telegram WebView.");
+          }
+        } catch (err) {
+          showBad("Не удалось отправить заявку. Попробуйте ещё раз.");
+        } finally {
+          setTimeout(function () {
+            submitBtn.disabled = false;
+          }, 800);
+        }
+      });
+
+      closeBtn.addEventListener("click", function () {
+        if (tg && typeof tg.close === "function") {
+          tg.close();
+        }
+      });
+    })();
   </script>
 </body>
 </html>

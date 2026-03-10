@@ -19,6 +19,8 @@ from booking_service import (
 from booking_render import render_booking_card
 from db import connect, init_schema
 
+MINIAPP_URL = "https://botluch-production.up.railway.app/miniapp/reserve"
+
 
 def _h(s: str) -> str:
     return html.escape(s or "", quote=False)
@@ -29,6 +31,78 @@ def ensure_db():
     init_schema(conn)
     conn.commit()
     return conn
+
+
+def build_luch_main_menu():
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "🍸 Забронировать",
+                    "web_app": {"url": MINIAPP_URL}
+                },
+                {
+                    "text": "📖 Меню",
+                    "url": "https://barluch.ru/osnovnoe-menu"
+                }
+            ],
+            [
+                {
+                    "text": "🎧 Line-up",
+                    "callback_data": "lineup"
+                },
+                {
+                    "text": "✨ О Луче",
+                    "callback_data": "about_luch"
+                }
+            ],
+            [
+                {
+                    "text": "📍 Контакты",
+                    "callback_data": "contacts_luch"
+                },
+                {
+                    "text": "🥂 Банкеты",
+                    "callback_data": "banquets_luch"
+                }
+            ]
+        ]
+    }
+
+
+def get_luch_info_text(section: str) -> str:
+    section = (section or "").strip().lower()
+
+    if section == "about_luch":
+        return (
+            "<b>О Луче</b>\n\n"
+            "LUCH — бар и ресторан в пространстве бывшего завода на Большой Пироговской.\n"
+            "Это проект с акцентом на атмосферу, барную культуру, вечерние события, "
+            "ужины, встречи и выходные с DJ-программой.\n\n"
+            "Для бронирования используйте кнопку «Забронировать», "
+            "а с актуальным меню можно ознакомиться по кнопке «Меню»."
+        )
+
+    if section == "contacts_luch":
+        return (
+            "<b>Контакты</b>\n\n"
+            "Адрес: Москва, Большая Пироговская, 27/1\n"
+            "Телефон: +7 (495) 287-00-22\n\n"
+            "Для брони удобнее всего использовать кнопку «Забронировать» в меню бота."
+        )
+
+    if section == "banquets_luch":
+        return (
+            "<b>Банкеты и мероприятия</b>\n\n"
+            "В LUCH можно обсудить проведение банкетов, закрытых мероприятий, "
+            "ужинов и специальных событий.\n\n"
+            "Для быстрого контакта оставьте бронь через мини-апп или свяжитесь с площадкой по телефону."
+        )
+
+    return (
+        "<b>LUCH</b>\n\n"
+        "Используйте кнопки ниже: бронь, меню, line-up, контакты и информация о проекте."
+    )
 
 
 def tg_webhook_impl():
@@ -53,6 +127,37 @@ def tg_webhook_impl():
             chat = msg.get("chat") or {}
             chat_id = str(chat.get("id") or "")
             message_id = str(msg.get("message_id") or "")
+
+            if data == "about_luch":
+                tg_answer_callback(cq_id)
+                tg_send_message(chat_id, get_luch_info_text("about_luch"), reply_markup=build_luch_main_menu())
+                return {"ok": True}
+
+            if data == "contacts_luch":
+                tg_answer_callback(cq_id)
+                tg_send_message(chat_id, get_luch_info_text("contacts_luch"), reply_markup=build_luch_main_menu())
+                return {"ok": True}
+
+            if data == "banquets_luch":
+                tg_answer_callback(cq_id)
+                tg_send_message(chat_id, get_luch_info_text("banquets_luch"), reply_markup=build_luch_main_menu())
+                return {"ok": True}
+
+            if data == "lineup":
+                tg_answer_callback(cq_id)
+
+                lineup_row = conn.execute(
+                    "SELECT file_id, caption FROM lineup_posters ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+
+                if not lineup_row:
+                    tg_send_message(chat_id, "🎵 DJ line-up скоро появится!", build_luch_main_menu())
+                    return {"ok": True}
+
+                file_id = lineup_row["file_id"]
+                caption = lineup_row["caption"] or "🎵 <b>DJ line-up LUCH</b>\n\nПятница / Суббота"
+                tg_send_photo(chat_id, file_id, caption)
+                return {"ok": True}
 
             if data.startswith("promo:redeem:"):
                 code = data.replace("promo:redeem:", "", 1).strip()
@@ -250,25 +355,10 @@ def tg_webhook_impl():
                     # Теперь показываем кнопку с Mini App
                     start_text = (
                         "✅ <b>Спасибо за контакт!</b>\n\n"
-                        "Теперь вы можете забронировать стол прямо внутри Telegram.\n"
-                        "Там можно выбрать дату, время, количество гостей и комментарий."
+                        "Главное меню LUCH готово.\n"
+                        "Выберите нужный раздел кнопками ниже."
                     )
-                    start_kb = {
-                        "keyboard": [
-                            [
-                                {
-                                    "text": "🍸 Открыть форму брони",
-                                    "web_app": {
-                                        "url": "https://botluch-production.up.railway.app/miniapp/reserve"
-                                    }
-                                }
-                            ],
-                            [{"text": "🎵 Line-up"}]
-                        ],
-                        "resize_keyboard": True,
-                        "one_time_keyboard": False
-                    }
-                    tg_send_message(chat_id, start_text, start_kb)
+                    tg_send_message(chat_id, start_text, build_luch_main_menu())
 
                 conn.commit()
                 return {"ok": True}
@@ -496,25 +586,10 @@ def tg_webhook_impl():
                     # Показываем кнопку с Mini App
                     start_text = (
                         "🍸 <b>LUCHBAR</b>\n\n"
-                        "Откройте форму бронирования прямо внутри Telegram.\n"
-                        "Там можно выбрать дату, время, количество гостей и комментарий."
+                        "Выберите нужный раздел в меню ниже: бронь, меню, line-up, "
+                        "контакты или информация о проекте."
                     )
-                    start_kb = {
-                        "keyboard": [
-                            [
-                                {
-                                    "text": "🍸 Открыть форму брони",
-                                    "web_app": {
-                                        "url": "https://botluch-production.up.railway.app/miniapp/reserve"
-                                    }
-                                }
-                            ],
-                            [{"text": "🎵 Line-up"}]
-                        ],
-                        "resize_keyboard": True,
-                        "one_time_keyboard": False
-                    }
-                    tg_send_message(chat_id, start_text, start_kb)
+                    tg_send_message(chat_id, start_text, build_luch_main_menu())
                 
                 return {"ok": True}
 
