@@ -8,12 +8,38 @@ def now_iso_seconds_utc() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
 
 
-def compute_segment(visits_count: int, tags: list[str]) -> str:
-    if "VIP" in tags:
-        return "VIP"
-    if visits_count <= 0:
-        return "NEW"
-    return "REGULAR"
+def compute_segment(visits_count: int, tags: list[str] = None) -> str:
+    """
+    Возвращает display-статус гостя на основе количества визитов.
+    Новая бизнес-логика (русские названия):
+    - 0-1 визит → Новый
+    - 2-4 визита → Бывалый
+    - 5+ визитов → Постоянный
+    """
+    visits = int(visits_count or 0)
+    if visits == 0 or visits == 1:
+        return "Новый"
+    elif 2 <= visits <= 4:
+        return "Бывалый"
+    else:
+        return "Постоянный"
+
+
+def get_guest_visits_full(conn, phone_e164: str):
+    """
+    Возвращает полную историю визитов гостя, упорядоченную от новых к старым.
+    Используется для отдельного сообщения 'История визитов'.
+    """
+    visits = conn.execute(
+        """
+        SELECT reservation_dt, formname, source
+        FROM guest_visits
+        WHERE phone_e164=?
+        ORDER BY reservation_dt DESC, id DESC
+        """,
+        (phone_e164,),
+    ).fetchall()
+    return visits
 
 
 def upsert_guest_if_missing(conn, phone_e164: str, name_last: str):

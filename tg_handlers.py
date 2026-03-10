@@ -12,11 +12,11 @@ from booking_service import (
     log_booking_event,
     log_guest_event,
     add_guest_note,
-    toggle_guest_tag,
     ensure_visit_from_confirmed_booking,
     mark_booking_cancelled,
 )
 from booking_render import render_booking_card
+    from booking_render import render_guest_visits_message
 from db import connect, init_schema
 
 MINIAPP_URL = "https://botluch-production.up.railway.app/miniapp/reserve"
@@ -206,30 +206,15 @@ def tg_webhook_impl():
                 if phone:
                     upsert_guest_if_missing(conn, phone, "")
 
-                if parts[2] == "tag" and len(parts) >= 4:
-                    tag = parts[3].strip().upper()
-                    if not phone:
-                        tg_answer_callback(cq_id, "Нет телефона у брони")
-                        return {"ok": True}
+                                if parts[2] == "visits":
+                                    if not phone:
+                                        tg_answer_callback(cq_id, "Нет телефона у брони")
+                                        return {"ok": True}
 
-                    tags2, action = toggle_guest_tag(conn, phone, tag)
-                    log_guest_event(conn, phone, action, actor_id, actor_name, {"tag": tag})
-
-                    g_row = conn.execute(
-                        "SELECT visits_count FROM guests WHERE phone_e164=?",
-                        (phone,),
-                    ).fetchone()
-                    visits_count = int(g_row["visits_count"] or 0) if g_row else 0
-                    seg = compute_segment(visits_count, tags2)
-                    conn.execute(
-                        "UPDATE bookings SET guest_segment=?, updated_at=datetime('now') WHERE id=?",
-                        (seg, booking_id),
-                    )
-
-                    text, kb = render_booking_card(conn, booking_id)
-                    tg_edit_message(chat_id, message_id, text, kb)
-                    tg_answer_callback(cq_id, "Готово")
-                    return {"ok": True}
+                                    visits_msg = render_guest_visits_message(conn, phone)
+                                    tg_send_message(chat_id, visits_msg)
+                                    tg_answer_callback(cq_id, "История отправлена")
+                                    return {"ok": True}
 
                 if parts[2] == "booking" and len(parts) >= 4:
                     action = parts[3].strip().lower()
