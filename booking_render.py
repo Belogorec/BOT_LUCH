@@ -117,7 +117,7 @@ def render_guest_visits_message(conn, phone_e164: str) -> str:
     if guest_data:
         g, tags, visits_3, notes, cancels_90 = guest_data
         visits_count = int(g["visits_count"] or 0)
-        name = g.get("name_last") or "—"
+        name = g["name_last"] or "—"
     else:
         visits_count = 0
         name = "—"
