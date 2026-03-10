@@ -63,7 +63,7 @@ def build_luch_main_menu():
                 },
                 {
                     "text": "🥂 Банкеты",
-                    "callback_data": "banquets_luch"
+                    "url": "https://barluch.ru/banket"
                 }
             ]
         ]
@@ -136,11 +136,6 @@ def tg_webhook_impl():
             if data == "contacts_luch":
                 tg_answer_callback(cq_id)
                 tg_send_message(chat_id, get_luch_info_text("contacts_luch"), reply_markup=build_luch_main_menu())
-                return {"ok": True}
-
-            if data == "banquets_luch":
-                tg_answer_callback(cq_id)
-                tg_send_message(chat_id, get_luch_info_text("banquets_luch"), reply_markup=build_luch_main_menu())
                 return {"ok": True}
 
             if data == "lineup":
@@ -468,8 +463,52 @@ def tg_webhook_impl():
                     {"source": "telegram_miniapp"},
                 )
 
+                # Проверяем наличие TG_CHAT_ID
+                if not TG_CHAT_ID:
+                    log_booking_event(
+                        conn,
+                        booking_id,
+                        "TG_SYNC_FAIL",
+                        "system",
+                        "system",
+                        {
+                            "reason": "TG_CHAT_ID_EMPTY",
+                            "error": "Чат администраторов не настроен",
+                            "source": "telegram_miniapp"
+                        },
+                    )
+                    tg_send_message(
+                        chat_id,
+                        "❌ <b>Ошибка отправки</b>\n\n"
+                        "Заявка сохранена, но чат администраторов не настроен. "
+                        "Свяжитесь с поддержкой."
+                    )
+                    return {"ok": True}
+
                 text, kb = render_booking_card(conn, booking_id)
-                msg_id = tg_send_message(str(TG_CHAT_ID), text, kb)
+                try:
+                    msg_id = tg_send_message(str(TG_CHAT_ID), text, kb)
+                except Exception as e:
+                    log_booking_event(
+                        conn,
+                        booking_id,
+                        "TG_SYNC_FAIL",
+                        "system",
+                        "system",
+                        {
+                            "reason": "SEND_TO_ADMIN_CHAT_FAILED",
+                            "target_chat_id": str(TG_CHAT_ID),
+                            "error": str(e),
+                            "source": "telegram_miniapp"
+                        },
+                    )
+                    tg_send_message(
+                        chat_id,
+                        "❌ <b>Ошибка отправки</b>\n\n"
+                        "Заявка сохранена, но чат администраторов недоступен. "
+                        "Попробуйте ещё раз позже или свяжитесь прямо по телефону."
+                    )
+                    return {"ok": True}
 
                 conn.execute(
                     """
@@ -486,7 +525,7 @@ def tg_webhook_impl():
                     "TG_SYNC_OK",
                     "system",
                     "system",
-                    {"status": "sent", "source": "telegram_miniapp"},
+                    {"target_chat_id": str(TG_CHAT_ID), "status": "sent", "source": "telegram_miniapp"},
                 )
 
                 # гостю пока не подтверждаем бронь — только сообщаем, что заявка принята в работу

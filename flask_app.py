@@ -96,13 +96,13 @@ def miniapp_reserve():
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root{
-      --bg:#0a0a0a;
-      --card:#121212;
+      --bg:#0b0b0b;
+      --card:#131313;
       --stroke:rgba(255,255,255,.08);
       --text:#f5f5f5;
       --muted:rgba(255,255,255,.62);
-      --accent:#c79a2b;
-      --accent-2:#e0b54b;
+      --accent:#cc9933;
+      --accent-2:#dd9933;
       --danger:#ff6b6b;
       --ok:#61d095;
       --radius:18px;
@@ -150,27 +150,29 @@ def miniapp_reserve():
       border:1px solid var(--stroke);
       border-radius:var(--radius);
       box-shadow:var(--shadow);
-      padding:18px;
+      padding:20px;
     }
 
     .eyebrow{
       color:var(--accent);
-      font-size:12px;
+      font-size:11px;
       line-height:1.2;
-      letter-spacing:.16em;
+      letter-spacing:.18em;
       text-transform:uppercase;
       margin:0 0 8px 0;
+      font-weight:600;
     }
 
     h1{
-      margin:0 0 8px 0;
+      margin:0 0 6px 0;
       font-size:28px;
       line-height:1.05;
       letter-spacing:.01em;
+      font-weight:700;
     }
 
     .sub{
-      margin:0 0 18px 0;
+      margin:0 0 20px 0;
       color:var(--muted);
       font-size:14px;
       line-height:1.45;
@@ -181,6 +183,7 @@ def miniapp_reserve():
       grid-template-columns:repeat(3, minmax(0, 1fr));
       gap:12px;
       min-width:0;
+      margin-bottom:6px;
     }
 
     .field{
@@ -196,11 +199,12 @@ def miniapp_reserve():
     }
 
     .label{
-      font-size:12px;
+      font-size:11px;
       line-height:1.2;
       color:var(--muted);
-      letter-spacing:.06em;
+      letter-spacing:.08em;
       text-transform:uppercase;
+      font-weight:500;
     }
 
     input,
@@ -216,52 +220,62 @@ def miniapp_reserve():
       width:100%;
       min-width:0;
       max-width:100%;
-      border:1px solid rgba(255,255,255,.10);
-      background:#111;
+      border:1px solid rgba(255,255,255,.12);
+      background:rgba(20,20,20,.6);
       color:var(--text);
-      border-radius:14px;
+      border-radius:12px;
       outline:none;
       box-shadow:none;
       appearance:none;
       -webkit-appearance:none;
+      transition:border-color .2s ease, box-shadow .2s ease;
     }
 
     input,
     select{
-      height:52px;
+      height:50px;
       padding:0 14px;
     }
 
     textarea{
-      min-height:112px;
+      min-height:108px;
       resize:vertical;
-      padding:14px;
+      padding:12px 14px;
+      font-size:14px;
     }
 
     input:focus,
     select:focus,
     textarea:focus{
-      border-color:rgba(199,154,43,.9);
-      box-shadow:0 0 0 3px rgba(199,154,43,.16);
+      border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(204,153,51,.12);
+    }
+
+    select{
+      background-image:url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(245,245,245,.7)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+      background-repeat:no-repeat;
+      background-position:right 12px center;
+      background-size:18px;
+      padding-right:40px;
     }
 
     .hint{
       margin-top:14px;
       color:var(--muted);
-      font-size:13px;
+      font-size:12px;
       line-height:1.45;
     }
 
     .error{
       min-height:20px;
-      margin-top:12px;
+      margin:12px 0 0 0;
       color:var(--danger);
       font-size:13px;
       line-height:1.35;
     }
 
     .actions{
-      margin-top:16px;
+      margin-top:18px;
       display:grid;
       grid-template-columns:1fr;
       gap:10px;
@@ -271,14 +285,14 @@ def miniapp_reserve():
       width:100%;
       min-height:54px;
       border:none;
-      border-radius:14px;
+      border-radius:12px;
       background:var(--accent);
-      color:#111;
+      color:#0b0b0b;
       font-weight:700;
-      font-size:16px;
-      letter-spacing:.02em;
+      font-size:15px;
+      letter-spacing:.03em;
       cursor:pointer;
-      transition:transform .15s ease, opacity .15s ease, background .15s ease;
+      transition:transform .12s ease, opacity .12s ease, background .12s ease;
     }
 
     .btn:active{
@@ -286,20 +300,14 @@ def miniapp_reserve():
     }
 
     .btn[disabled]{
-      opacity:.6;
-      cursor:default;
-    }
-
-    .ghost{
-      background:transparent;
-      color:var(--text);
-      border:1px solid rgba(255,255,255,.12);
+      opacity:.5;
+      cursor:not-allowed;
     }
 
     .status{
       margin-top:12px;
       padding:12px 14px;
-      border-radius:14px;
+      border-radius:12px;
       font-size:14px;
       line-height:1.4;
       display:none;
@@ -307,12 +315,12 @@ def miniapp_reserve():
 
     .status.show{ display:block; }
     .status.ok{
-      background:rgba(97,208,149,.10);
+      background:rgba(97,208,149,.12);
       border:1px solid rgba(97,208,149,.24);
-      color:#baf0cf;
+      color:#a8f0d8;
     }
     .status.bad{
-      background:rgba(255,107,107,.10);
+      background:rgba(255,107,107,.12);
       border:1px solid rgba(255,107,107,.24);
       color:#ffc4c4;
     }
@@ -328,12 +336,13 @@ def miniapp_reserve():
 
       .card{
         width:100%;
-        padding:14px;
-        border-radius:16px;
+        padding:16px;
+        border-radius:14px;
       }
 
       h1{
         font-size:24px;
+        margin-bottom:4px;
       }
 
       .grid{
@@ -343,11 +352,16 @@ def miniapp_reserve():
 
       input,
       select{
-        height:50px;
+        height:48px;
       }
 
       textarea{
-        min-height:104px;
+        min-height:100px;
+      }
+
+      .btn{
+        min-height:50px;
+        font-size:14px;
       }
     }
   </style>
@@ -387,6 +401,12 @@ def miniapp_reserve():
               <option>8</option>
               <option>9</option>
               <option>10</option>
+              <option>11</option>
+              <option>12</option>
+              <option>15</option>
+              <option>20</option>
+              <option>25</option>
+              <option>30</option>
             </select>
           </label>
 
@@ -404,7 +424,6 @@ def miniapp_reserve():
 
         <div class="actions">
           <button id="submitBtn" class="btn" type="submit">Отправить заявку</button>
-          <button id="closeBtn" class="btn ghost" type="button">Закрыть</button>
         </div>
 
         <div class="hint">
@@ -425,8 +444,8 @@ def miniapp_reserve():
         tg.ready();
         tg.expand();
         try {
-          tg.setHeaderColor("#0a0a0a");
-          tg.setBackgroundColor("#0a0a0a");
+          tg.setHeaderColor("#0b0b0b");
+          tg.setBackgroundColor("#0b0b0b");
         } catch (_) {}
       }
 
@@ -436,7 +455,6 @@ def miniapp_reserve():
       const guestsInput = document.getElementById("guests");
       const commentInput = document.getElementById("comment");
       const submitBtn = document.getElementById("submitBtn");
-      const closeBtn = document.getElementById("closeBtn");
       const errorBox = document.getElementById("error");
       const statusOk = document.getElementById("statusOk");
       const statusBad = document.getElementById("statusBad");
@@ -563,22 +581,20 @@ def miniapp_reserve():
         try {
           if (tg && typeof tg.sendData === "function") {
             tg.sendData(JSON.stringify(payload));
-            showOk("Заявка отправлена. Сейчас можно закрыть окно.");
+            showOk("Заявка отправлена ✓");
+            
+            setTimeout(function () {
+              if (tg && typeof tg.close === "function") {
+                tg.close();
+              }
+            }, 350);
           } else {
             showBad("Mini App открыт вне Telegram WebView.");
+            submitBtn.disabled = false;
           }
         } catch (err) {
           showBad("Не удалось отправить заявку. Попробуйте ещё раз.");
-        } finally {
-          setTimeout(function () {
-            submitBtn.disabled = false;
-          }, 800);
-        }
-      });
-
-      closeBtn.addEventListener("click", function () {
-        if (tg && typeof tg.close === "function") {
-          tg.close();
+          submitBtn.disabled = false;
         }
       });
     })();
