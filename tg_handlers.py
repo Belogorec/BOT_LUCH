@@ -1,5 +1,6 @@
 import html
 import json
+import os
 from datetime import datetime, timedelta
 
 from flask import request, abort
@@ -27,7 +28,10 @@ from booking_render import (
 )
 from db import connect, init_schema
 
-MINIAPP_URL = "https://botluch-production.up.railway.app/miniapp/reserve"
+MINIAPP_URL = os.environ.get(
+    "MINIAPP_URL",
+    "https://botluch-production.up.railway.app/miniapp/reserve",
+).strip()
 
 
 def _h(s: str) -> str:
@@ -908,7 +912,7 @@ def tg_webhook_impl():
                     return {"ok": True}
 
             if not text:
-            return {"ok": True}
+                return {"ok": True}
 
         return {"ok": True}
     finally:

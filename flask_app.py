@@ -643,8 +643,11 @@ def public_api_guest_lookup():
 
 
 
-@app.post("/api/booking")
+@app.route("/api/booking", methods=["POST", "OPTIONS"])
 def api_submit_booking():
+  if request.method == "OPTIONS":
+    return ("", 204)
+
   data = request.get_json(silent=True) or {}
 
   # Извлекаем tg_user_id из initData (строка URL-encoded из Telegram.WebApp.initData)
@@ -754,10 +757,14 @@ def api_submit_booking():
 
 @app.after_request
 def _admin_api_cors(resp):
-    if request.path.startswith("/admin/api/") or request.path.startswith("/public/api/"):
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+  if (
+    request.path.startswith("/admin/api/")
+    or request.path.startswith("/public/api/")
+    or request.path.startswith("/api/booking")
+  ):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
 
 
