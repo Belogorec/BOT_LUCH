@@ -105,9 +105,6 @@ def init_schema(conn: sqlite3.Connection):
 
         CREATE INDEX IF NOT EXISTS idx_bookings_phone ON bookings(phone_e164);
         CREATE INDEX IF NOT EXISTS idx_bookings_resdt ON bookings(reservation_dt);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_reservation_token
-          ON bookings(reservation_token)
-          WHERE reservation_token IS NOT NULL;
 
         -- ===== booking_events =====
         CREATE TABLE IF NOT EXISTS booking_events (
@@ -226,6 +223,31 @@ def init_schema(conn: sqlite3.Connection):
           WHERE reservation_token IS NOT NULL
         """
     )
+
+
+def run_migrations(conn: sqlite3.Connection):
+    row = conn.execute("PRAGMA user_version").fetchone()
+    version = int(row[0]) if row else 0
+
+    if version < 1:
+        init_schema(conn)
+        conn.execute("PRAGMA user_version = 1")
+        version = 1
+
+    if version < 2:
+        _ensure_column(conn, "bookings", "reservation_token", "TEXT")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_reservation_token
+              ON bookings(reservation_token)
+              WHERE reservation_token IS NOT NULL
+            """
+        )
+        conn.execute("PRAGMA user_version = 2")
+
+    # Defensive idempotent step for environments with inconsistent user_version.
+    init_schema(conn)
+    conn.commit()
 
 
 def rebuild_guests_from_visits(conn: sqlite3.Connection):

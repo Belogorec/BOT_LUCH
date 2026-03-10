@@ -11,14 +11,11 @@ from booking_service import (
     log_booking_event,
 )
 from booking_render import render_booking_card
-from db import connect, init_schema, get_tags
+from db import connect, get_tags
 
 
 def ensure_db():
-    conn = connect()
-    init_schema(conn)
-    conn.commit()
-    return conn
+    return connect()
 
 
 def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm):

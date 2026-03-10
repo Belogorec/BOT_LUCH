@@ -2,6 +2,7 @@ import html
 import hashlib
 import json
 import os
+import traceback
 from datetime import datetime, timedelta
 
 from flask import request, abort
@@ -27,7 +28,7 @@ from booking_render import (
     render_booking_card,
     render_guest_visits_message,
 )
-from db import connect, init_schema
+from db import connect
 
 MINIAPP_URL = os.environ.get(
     "MINIAPP_URL",
@@ -40,10 +41,7 @@ def _h(s: str) -> str:
 
 
 def ensure_db():
-    conn = connect()
-    init_schema(conn)
-    conn.commit()
-    return conn
+    return connect()
 
 
 def build_luch_main_menu():
@@ -967,6 +965,19 @@ def tg_webhook_impl():
             if not text:
                 return {"ok": True}
 
+        return {"ok": True}
+    except Exception as e:
+        print(
+            "[TG-WEBHOOK] ERROR "
+            f"update_id={update_id} "
+            f"type={update_type} "
+            f"chat_id={chat_id_dbg} "
+            f"message_id={message_id_dbg} "
+            f"callback_query_id={callback_query_id_dbg} "
+            f"error={e}",
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
         return {"ok": True}
     finally:
         conn.commit()

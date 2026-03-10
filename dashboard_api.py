@@ -3,14 +3,11 @@ from datetime import datetime, timedelta
 from flask import request, abort
 
 from config import DASHBOARD_SECRET, ANALYTICS_TZ_OFFSET_HOURS
-from db import connect, init_schema
+from db import connect
 
 
 def ensure_db():
-    conn = connect()
-    init_schema(conn)
-    conn.commit()
-    return conn
+    return connect()
 
 
 def require_dashboard_key():

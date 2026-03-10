@@ -10,7 +10,7 @@ from dashboard_api import (
     admin_api_segments_impl,
     admin_api_load_impl,
 )
-from db import connect, init_schema
+from db import connect, run_migrations
 from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
 
@@ -71,10 +71,18 @@ def normalize_phone_e164(raw: str, default_region: str = "RU") -> str:
 
 
 def ensure_db():
-    conn = connect()
-    init_schema(conn)
-    conn.commit()
-    return conn
+  return connect()
+
+
+def bootstrap_schema():
+  conn = connect()
+  try:
+    run_migrations(conn)
+  finally:
+    conn.close()
+
+
+bootstrap_schema()
 
 
 # =========================
