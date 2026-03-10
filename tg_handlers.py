@@ -216,8 +216,7 @@ def tg_webhook_impl():
                     return {"ok": True}
 
                 file_id = lineup_row["file_id"]
-                caption = lineup_row["caption"] or "🎵 <b>DJ line-up LUCH</b>\n\nПятница / Суббота"
-                tg_send_photo(chat_id, file_id, caption)
+                tg_send_photo(chat_id, file_id)
                 return {"ok": True}
 
             if data.startswith("promo:redeem:"):
@@ -892,9 +891,8 @@ def tg_webhook_impl():
                     return {"ok": True}
 
                 file_id = lineup_row["file_id"]
-                caption = lineup_row["caption"] or "🎵 <b>DJ line-up LUCH</b>\n\nПятница / Суббота"
 
-                tg_send_photo(chat_id, file_id, caption)
+                tg_send_photo(chat_id, file_id)
                 return {"ok": True}
 
             # Обработка фото (для загрузки афиши)
