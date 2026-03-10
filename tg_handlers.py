@@ -56,31 +56,35 @@ def build_booking_keyboard():
 
 def build_luch_main_menu():
     """Inline keyboard для навигации по разделам бара.
-    НЕ содержит кнопку бронирования — она живёт в reply keyboard.
+    Кнопка Забронировать стоит первой — открывает Mini App.
     """
     return {
         "inline_keyboard": [
             [
                 {
+                    "text": "🍸 Забронировать",
+                    "web_app": {"url": MINIAPP_URL}
+                },
+                {
                     "text": "📖 Меню",
                     "url": "https://barluch.ru/osnovnoe-menu"
                 },
+            ],
+            [
                 {
                     "text": "🎧 Line-up",
                     "callback_data": "lineup"
-                }
-            ],
-            [
+                },
                 {
                     "text": "✨ О Луче",
                     "callback_data": "about_luch"
                 },
+            ],
+            [
                 {
                     "text": "📍 Контакты",
                     "callback_data": "contacts_luch"
-                }
-            ],
-            [
+                },
                 {
                     "text": "🥂 Банкеты",
                     "url": "https://barluch.ru/banket"
@@ -569,6 +573,46 @@ def tg_webhook_impl():
                 # Support commands in groups like /lineup@my_bot
                 cmd = text.split()[0].split("@", 1)[0].lower()
 
+            # ===== Высокий приоритет: ожидание комментария к гостю =====
+            # Обрабатывается ДО команд, загрузки афиши и любых других pending-сценариев.
+            if text and not cmd:
+                _note_row = conn.execute(
+                    """
+                    SELECT id, booking_id, phone_e164, expires_at
+                    FROM pending_replies
+                    WHERE chat_id=? AND actor_tg_id=? AND kind='guest_note'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (chat_id, actor_id),
+                ).fetchone()
+                if _note_row:
+                    _valid = True
+                    try:
+                        _exp = datetime.fromisoformat(str(_note_row["expires_at"]))
+                        if datetime.utcnow() > _exp:
+                            conn.execute("DELETE FROM pending_replies WHERE id=?", (_note_row["id"],))
+                            _valid = False
+                    except Exception:
+                        pass
+                    if _valid:
+                        _booking_id = int(_note_row["booking_id"])
+                        _phone = str(_note_row["phone_e164"] or "")
+                        add_guest_note(conn, _phone, text, actor_id, actor_name)
+                        conn.execute("DELETE FROM pending_replies WHERE id=?", (_note_row["id"],))
+                        _b = conn.execute(
+                            "SELECT telegram_chat_id, telegram_message_id FROM bookings WHERE id=?",
+                            (_booking_id,),
+                        ).fetchone()
+                        if _b and _b["telegram_chat_id"] and _b["telegram_message_id"]:
+                            _card_text, _card_kb = render_booking_card(conn, _booking_id)
+                            tg_edit_message(
+                                str(_b["telegram_chat_id"]),
+                                str(_b["telegram_message_id"]),
+                                _card_text, _card_kb,
+                            )
+                        tg_send_message(chat_id, "Комментарий к гостю сохранён.")
+                        return {"ok": True}
+
             if cmd == "/start":
                 parts = text.split()
 
@@ -864,61 +908,6 @@ def tg_webhook_impl():
                     return {"ok": True}
 
             if not text:
-                return {"ok": True}
-
-            reply_to = m.get("reply_to_message")
-            prompt_mid = str(reply_to.get("message_id") or "") if reply_to else ""
-
-            row = None
-
-            if prompt_mid:
-                row = conn.execute(
-                    """
-                    SELECT id, booking_id, phone_e164, expires_at
-                    FROM pending_replies
-                    WHERE chat_id=? AND prompt_message_id=? AND actor_tg_id=? AND kind='guest_note'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (chat_id, prompt_mid, actor_id),
-                ).fetchone()
-
-            if row is None:
-                row = conn.execute(
-                    """
-                    SELECT id, booking_id, phone_e164, expires_at
-                    FROM pending_replies
-                    WHERE chat_id=? AND actor_tg_id=? AND kind='guest_note'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (chat_id, actor_id),
-                ).fetchone()
-
-            if not row:
-                return {"ok": True}
-
-            try:
-                exp = datetime.fromisoformat(str(row["expires_at"]))
-                if datetime.utcnow() > exp:
-                    conn.execute("DELETE FROM pending_replies WHERE id=?", (row["id"],))
-                    return {"ok": True}
-            except Exception:
-                pass
-
-            booking_id = int(row["booking_id"])
-            phone = str(row["phone_e164"] or "")
-
-            add_guest_note(conn, phone, text, actor_id, actor_name)
-            conn.execute("DELETE FROM pending_replies WHERE id=?", (row["id"],))
-
-            b = conn.execute(
-                "SELECT telegram_chat_id, telegram_message_id FROM bookings WHERE id=?",
-                (booking_id,),
-            ).fetchone()
-            if b and b["telegram_chat_id"] and b["telegram_message_id"]:
-                card_text, kb = render_booking_card(conn, booking_id)
-                tg_edit_message(str(b["telegram_chat_id"]), str(b["telegram_message_id"]), card_text, kb)
-
-            tg_send_message(chat_id, "Сохранён в базе.")
             return {"ok": True}
 
         return {"ok": True}

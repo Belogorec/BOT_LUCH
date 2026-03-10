@@ -1,5 +1,8 @@
 import re
 
+import json
+import urllib.parse
+
 from flask import Flask, request
 
 from dashboard_api import (
@@ -573,40 +576,35 @@ def miniapp_reserve():
           date: dateInput.value,
           time: timeInput.value,
           guests: guestsInput.value,
-          comment: (commentInput.value || "").trim()
+          comment: (commentInput.value || "").trim(),
+          initData: (tg && tg.initData) ? tg.initData : ""
         };
 
         submitBtn.disabled = true;
 
-        try {
-          // Защита: sendData работает только если Mini App открыт через reply keyboard (KeyboardButton).
-          // Если query_id задан — это inline-режим, sendData не дойдёт до бота.
-          if (tg && tg.initDataUnsafe && tg.initDataUnsafe.query_id) {
-            showBad(
-              "Откройте форму через кнопку «Забронировать» в нижней панели чата: " +
-              "по этой кнопке бронь не дойдёт до администратора."
-            );
-            submitBtn.disabled = false;
-            return;
-          }
-
-          if (tg && typeof tg.sendData === "function") {
-            tg.sendData(JSON.stringify(payload));
+        fetch("/api/booking", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (result) {
+          if (result.ok) {
             showOk("Заявка отправлена ✓");
-
             setTimeout(function () {
               if (tg && typeof tg.close === "function") {
                 tg.close();
               }
-            }, 350);
+            }, 900);
           } else {
-            showBad("Mini App открыт вне Telegram WebView.");
+            showBad(result.error || "Ошибка отправки. Попробуйте ещё раз.");
             submitBtn.disabled = false;
           }
-        } catch (err) {
+        })
+        .catch(function () {
           showBad("Не удалось отправить заявку. Попробуйте ещё раз.");
           submitBtn.disabled = false;
-        }
+        });
       });
     })();
   </script>
@@ -643,6 +641,116 @@ def public_api_guest_lookup():
     finally:
         conn.close()
 
+
+
+@app.post("/api/booking")
+def api_submit_booking():
+  data = request.get_json(silent=True) or {}
+
+  # Извлекаем tg_user_id из initData (строка URL-encoded из Telegram.WebApp.initData)
+  init_data_str = (data.get("initData") or "").strip()
+  tg_user_id = ""
+  if init_data_str:
+    for part in init_data_str.split("&"):
+      if part.startswith("user="):
+        try:
+          user_obj = json.loads(urllib.parse.unquote(part[5:]))
+          tg_user_id = str(user_obj.get("id") or "")
+        except Exception:
+          pass
+        break
+
+  date_value = str(data.get("date") or "").strip()
+  time_value = str(data.get("time") or "").strip()
+  guests_value = str(data.get("guests") or "").strip()
+  comment_value = str(data.get("comment") or "").strip()
+
+  if not date_value or not time_value or not guests_value:
+    return {"ok": False, "error": "Форма заполнена не полностью"}, 400
+
+  try:
+    guests_count = int(guests_value)
+  except Exception:
+    guests_count = 0
+  if guests_count <= 0:
+    return {"ok": False, "error": "Некорректное количество гостей"}, 400
+
+  from booking_service import log_booking_event
+  from booking_render import render_booking_card
+  from telegram_api import tg_send_message as _tg_send
+  from config import TG_CHAT_ID
+
+  conn = ensure_db()
+  try:
+    user_row = None
+    if tg_user_id:
+      user_row = conn.execute(
+        "SELECT phone_e164, first_name FROM tg_bot_users WHERE tg_user_id=? AND has_shared_phone=1",
+        (tg_user_id,),
+      ).fetchone()
+    phone_e164 = user_row["phone_e164"] if user_row else None
+    saved_name = (user_row["first_name"] if user_row else None) or ""
+
+    raw_payload = json.dumps({
+      "source": "telegram_miniapp_api",
+      "requester_tg_user_id": tg_user_id,
+      "requester_chat_id": tg_user_id,
+      "requester_name": saved_name,
+      "date": date_value,
+      "time": time_value,
+      "guests": guests_count,
+      "comment": comment_value,
+    }, ensure_ascii=False)
+
+    cur = conn.execute(
+      """
+      INSERT INTO bookings
+      (tranid, formname, name, phone_e164, phone_raw,
+       reservation_date, reservation_time, reservation_dt,
+       guests_count, comment,
+       utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+       status, guest_segment, raw_payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?)
+      """,
+      (
+        None,
+        "telegram_miniapp",
+        saved_name or "Telegram",
+        phone_e164,
+        phone_e164,
+        date_value,
+        time_value,
+        f"{date_value} {time_value}:00",
+        guests_count,
+        comment_value,
+        "telegram", "miniapp", None, None, None,
+        "NEW",
+        raw_payload,
+      ),
+    )
+    booking_id = int(cur.lastrowid)
+    log_booking_event(conn, booking_id, "CREATED", tg_user_id, "", {"source": "telegram_miniapp_api"})
+
+    if TG_CHAT_ID:
+      card_text, kb = render_booking_card(conn, booking_id)
+      try:
+        msg_id = _tg_send(str(TG_CHAT_ID), card_text, kb)
+        if msg_id:
+          conn.execute(
+            "UPDATE bookings SET telegram_chat_id=?, telegram_message_id=?, updated_at=datetime('now') WHERE id=?",
+            (str(TG_CHAT_ID), str(msg_id), booking_id),
+          )
+          log_booking_event(conn, booking_id, "TG_SYNC_OK", "system", "system", {"target_chat_id": str(TG_CHAT_ID)})
+      except Exception as e:
+        log_booking_event(conn, booking_id, "TG_SYNC_FAIL", "system", "system", {"error": str(e)})
+
+    conn.commit()
+    return {"ok": True, "booking_id": booking_id}
+  except Exception as e:
+    conn.rollback()
+    return {"ok": False, "error": "Ошибка сервера"}, 500
+  finally:
+    conn.close()
 
 @app.after_request
 def _admin_api_cors(resp):
