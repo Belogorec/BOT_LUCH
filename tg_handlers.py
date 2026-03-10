@@ -41,34 +41,46 @@ def ensure_db():
     return conn
 
 
+def build_booking_keyboard():
+    """Reply keyboard с кнопкой Mini App бронирования.
+    Только через этот тип кнопки работает sendData / message.web_app_data.
+    """
+    return {
+        "keyboard": [
+            [{"text": "🍸 Забронировать", "web_app": {"url": MINIAPP_URL}}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
+
+
 def build_luch_main_menu():
+    """Inline keyboard для навигации по разделам бара.
+    НЕ содержит кнопку бронирования — она живёт в reply keyboard.
+    """
     return {
         "inline_keyboard": [
             [
                 {
-                    "text": "🍸 Забронировать",
-                    "web_app": {"url": MINIAPP_URL}
-                },
-                {
                     "text": "📖 Меню",
                     "url": "https://barluch.ru/osnovnoe-menu"
-                }
-            ],
-            [
+                },
                 {
                     "text": "🎧 Line-up",
                     "callback_data": "lineup"
-                },
-                {
-                    "text": "✨ О Луче",
-                    "callback_data": "about_luch"
                 }
             ],
             [
                 {
+                    "text": "✨ О Луче",
+                    "callback_data": "about_luch"
+                },
+                {
                     "text": "📍 Контакты",
                     "callback_data": "contacts_luch"
-                },
+                }
+            ],
+            [
                 {
                     "text": "🥂 Банкеты",
                     "url": "https://barluch.ru/banket"
@@ -340,22 +352,31 @@ def tg_webhook_impl():
                         (actor_id, actor_name, name or first_name, phone),
                     )
                     
-                    # Теперь показываем кнопку с Mini App
-                    start_text = (
+                    # Показываем reply keyboard с кнопкой бронирования (KeyboardButton web_app)
+                    # и отдельно inline-навигацию по разделам
+                    tg_send_message(
+                        chat_id,
                         "✅ <b>Спасибо за контакт!</b>\n\n"
-                        "Главное меню LUCH готово.\n"
-                        "Выберите нужный раздел кнопками ниже."
+                        "Кнопка <b>Забронировать</b> теперь доступна в нижней панели.",
+                        build_booking_keyboard(),
                     )
-                    tg_send_message(chat_id, start_text, build_luch_main_menu())
+                    tg_send_message(chat_id, "Разделы LUCH:", build_luch_main_menu())
 
                 conn.commit()
                 return {"ok": True}
 
             web_app_data = (m.get("web_app_data") or {}).get("data")
             if web_app_data:
+                print(
+                    f"[MINIAPP] web_app_data received: user={actor_id} chat={chat_id} "
+                    f"len={len(str(web_app_data))}",
+                    flush=True,
+                )
                 try:
                     payload = json.loads(str(web_app_data))
-                except Exception:
+                    print(f"[MINIAPP] payload parsed OK: keys={list(payload.keys())}", flush=True)
+                except Exception as e:
+                    print(f"[MINIAPP] JSON parse error: {e}", flush=True)
                     tg_send_message(chat_id, "Не удалось прочитать данные формы. Попробуйте ещё раз.")
                     return {"ok": True}
 
@@ -446,6 +467,11 @@ def tg_webhook_impl():
                     ),
                 )
                 booking_id = int(cur.lastrowid)
+                print(
+                    f"[MINIAPP] booking created: id={booking_id} "
+                    f"date={date_value} time={time_value} guests={guests_count}",
+                    flush=True,
+                )
 
                 log_booking_event(
                     conn,
@@ -458,6 +484,7 @@ def tg_webhook_impl():
 
                 # Проверяем наличие TG_CHAT_ID
                 if not TG_CHAT_ID:
+                    print(f"[MINIAPP] TG_CHAT_ID not configured, booking #{booking_id} NOT sent to admins", flush=True)
                     log_booking_event(
                         conn,
                         booking_id,
@@ -479,11 +506,13 @@ def tg_webhook_impl():
                     return {"ok": True}
 
                 text, kb = render_booking_card(conn, booking_id)
+                print(f"[MINIAPP] sending booking #{booking_id} to admin chat {TG_CHAT_ID}", flush=True)
                 try:
                     msg_id = tg_send_message(str(TG_CHAT_ID), text, kb)
                     if not msg_id:
                         raise RuntimeError("Telegram sendMessage returned empty message_id")
                 except Exception as e:
+                    print(f"[MINIAPP] ERROR sending booking #{booking_id} to admin chat {TG_CHAT_ID}: {e}", flush=True)
                     log_booking_event(
                         conn,
                         booking_id,
@@ -522,6 +551,7 @@ def tg_webhook_impl():
                     "system",
                     {"target_chat_id": str(TG_CHAT_ID), "status": "sent", "source": "telegram_miniapp"},
                 )
+                print(f"[MINIAPP] booking #{booking_id} sent OK, msg_id={msg_id}", flush=True)
 
                 # гостю пока не подтверждаем бронь — только сообщаем, что заявка принята в работу
                 waiting_text = (
@@ -617,13 +647,15 @@ def tg_webhook_impl():
                     }
                     tg_send_message(chat_id, contact_text, contact_kb)
                 else:
-                    # Показываем кнопку с Mini App
-                    start_text = (
+                    # Reply keyboard с кнопкой бронирования (KeyboardButton web_app — sendData работает только отсюда)
+                    # + отдельно inline-навигация по разделам
+                    tg_send_message(
+                        chat_id,
                         "🍸 <b>LUCHBAR</b>\n\n"
-                        "Выберите нужный раздел в меню ниже: бронь, меню, line-up, "
-                        "контакты или информация о проекте."
+                        "Кнопка <b>Забронировать</b> доступна в нижней панели.",
+                        build_booking_keyboard(),
                     )
-                    tg_send_message(chat_id, start_text, build_luch_main_menu())
+                    tg_send_message(chat_id, "Разделы:", build_luch_main_menu())
                 
                 return {"ok": True}
 

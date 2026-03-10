@@ -579,10 +579,21 @@ def miniapp_reserve():
         submitBtn.disabled = true;
 
         try {
+          // Защита: sendData работает только если Mini App открыт через reply keyboard (KeyboardButton).
+          // Если query_id задан — это inline-режим, sendData не дойдёт до бота.
+          if (tg && tg.initDataUnsafe && tg.initDataUnsafe.query_id) {
+            showBad(
+              "Откройте форму через кнопку «Забронировать» в нижней панели чата: " +
+              "по этой кнопке бронь не дойдёт до администратора."
+            );
+            submitBtn.disabled = false;
+            return;
+          }
+
           if (tg && typeof tg.sendData === "function") {
             tg.sendData(JSON.stringify(payload));
             showOk("Заявка отправлена ✓");
-            
+
             setTimeout(function () {
               if (tg && typeof tg.close === "function") {
                 tg.close();
