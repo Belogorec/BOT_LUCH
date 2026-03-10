@@ -409,8 +409,13 @@ def tg_webhook_impl():
                 return {"ok": True}
 
             text = (m.get("text") or "").strip()
+            text_lc = text.lower()
+            cmd = ""
+            if text.startswith("/"):
+                # Support commands in groups like /lineup@my_bot
+                cmd = text.split()[0].split("@", 1)[0].lower()
 
-            if text.startswith("/start"):
+            if cmd == "/start":
                 parts = text.split()
 
                 if len(parts) > 1 and parts[1].startswith("promo_"):
@@ -513,7 +518,7 @@ def tg_webhook_impl():
                 
                 return {"ok": True}
 
-            if text == "/myid":
+            if cmd == "/myid":
                 is_admin = actor_id in PROMO_ADMIN_IDS
                 admins_preview = ", ".join(PROMO_ADMIN_IDS[:10]) if PROMO_ADMIN_IDS else "(пусто)"
                 tg_send_message(
@@ -528,7 +533,7 @@ def tg_webhook_impl():
                 )
                 return {"ok": True}
 
-            if text == "/stat":
+            if cmd == "/stat":
                 if actor_id not in PROMO_ADMIN_IDS:
                     tg_send_message(chat_id, "Нет доступа.")
                     return {"ok": True}
@@ -581,7 +586,7 @@ def tg_webhook_impl():
                 tg_send_message(chat_id, "\n".join(lines))
                 return {"ok": True}
 
-            if text == "/set_lineup":
+            if cmd == "/set_lineup":
                 if actor_id not in PROMO_ADMIN_IDS:
                     tg_send_message(chat_id, "Нет доступа.")
                     return {"ok": True}
@@ -603,7 +608,7 @@ def tg_webhook_impl():
                 conn.commit()
                 return {"ok": True}
 
-            if text == "/lineup" or text.lower() == "line-up":
+            if cmd == "/lineup" or text_lc in ("line-up", "lineup", "🎵 line-up", "🎵 lineup"):
                 # Получаем последнюю афишу
                 lineup_row = conn.execute(
                     "SELECT file_id, caption FROM lineup_posters ORDER BY id DESC LIMIT 1"
@@ -668,6 +673,20 @@ def tg_webhook_impl():
 
                     tg_send_message(chat_id, "✅ Афиша сохранена!")
                     conn.commit()
+                    return {"ok": True}
+
+            if not photo and actor_id in PROMO_ADMIN_IDS:
+                pending_lineup = conn.execute(
+                    """
+                    SELECT id
+                    FROM pending_replies
+                    WHERE actor_tg_id=? AND kind='lineup_upload'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (actor_id,),
+                ).fetchone()
+                if pending_lineup and cmd != "/set_lineup":
+                    tg_send_message(chat_id, "Пожалуйста, отправьте изображение афиши (как фото).")
                     return {"ok": True}
 
             if not text:
