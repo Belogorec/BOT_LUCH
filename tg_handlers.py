@@ -5,18 +5,26 @@ from datetime import datetime, timedelta
 from flask import request, abort
 
 from config import TG_WEBHOOK_SECRET, PROMO_ADMIN_IDS, TG_CHAT_ID
-from telegram_api import tg_send_message, tg_edit_message, tg_answer_callback, tg_send_photo
+from telegram_api import (
+    tg_send_message,
+    tg_edit_message,
+    tg_answer_callback,
+    tg_send_photo,
+)
 from booking_service import (
     compute_segment,
     upsert_guest_if_missing,
     log_booking_event,
     log_guest_event,
     add_guest_note,
+    toggle_guest_tag,
     ensure_visit_from_confirmed_booking,
     mark_booking_cancelled,
 )
-from booking_render import render_booking_card
-    from booking_render import render_guest_visits_message
+from booking_render import (
+    render_booking_card,
+    render_guest_visits_message,
+)
 from db import connect, init_schema
 
 MINIAPP_URL = "https://botluch-production.up.railway.app/miniapp/reserve"
