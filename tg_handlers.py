@@ -744,21 +744,21 @@ def tg_webhook_impl():
                 has_phone = user_row and user_row["has_shared_phone"]
 
                 if not has_phone:
-                    tg_send_message(
-                        chat_id,
-                        "👋 <b>Добро пожаловать в LUCHBAR!</b>\n\n"
-                        "Используйте меню ниже для бронирования и навигации.",
-                        build_luch_main_menu(),
+                    contact_text = (
+                        "<b>Добро пожаловать в LUCHBAR!</b>\n\n"
+                        "Для бронирования нам нужен ваш номер телефона.\n"
+                        "Отправьте его в ответном сообщении в формате +7XXXXXXXXXX."
                     )
+                    tg_send_message(chat_id, contact_text, {"force_reply": True})
+                    return {"ok": True}
                 else:
                     tg_send_message(
                         chat_id,
-                        "🍸 <b>LUCHBAR</b>\n\n"
-                        "Используйте кнопку <b>Забронировать</b> в меню ниже.",
+                        "<b>LUCHBAR</b>\n\n"
+                        "Выберите нужный раздел ниже.",
                         build_luch_main_menu(),
                     )
-                
-                return {"ok": True}
+                    return {"ok": True}
 
             if cmd == "/myid":
                 is_admin = actor_id in PROMO_ADMIN_IDS
