@@ -214,15 +214,15 @@ def tg_webhook_impl():
                 if phone:
                     upsert_guest_if_missing(conn, phone, "")
 
-                                if parts[2] == "visits":
-                                    if not phone:
-                                        tg_answer_callback(cq_id, "Нет телефона у брони")
-                                        return {"ok": True}
+                if parts[2] == "visits":
+                    if not phone:
+                        tg_answer_callback(cq_id, "Нет телефона у брони")
+                        return {"ok": True}
 
-                                    visits_msg = render_guest_visits_message(conn, phone)
-                                    tg_send_message(chat_id, visits_msg)
-                                    tg_answer_callback(cq_id, "История отправлена")
-                                    return {"ok": True}
+                    visits_msg = render_guest_visits_message(conn, phone)
+                    tg_send_message(chat_id, visits_msg)
+                    tg_answer_callback(cq_id, "История отправлена")
+                    return {"ok": True}
 
                 if parts[2] == "booking" and len(parts) >= 4:
                     action = parts[3].strip().lower()
