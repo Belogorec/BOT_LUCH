@@ -140,20 +140,12 @@ def extract_name_from_contact(contact: dict) -> str:
 
 
 def ask_for_contact(chat_id: str, user_id: str) -> Tuple[str, dict]:
-    """Запрашивает контакт пользователя через встроенную кнопку Telegram."""
+    """Просит пользователя отправить контакт без нижней клавиатуры."""
     text = (
         "👋 Добрый день! Для бронирования нам нужны ваши контактные данные.\n\n"
-        "Пожалуйста, нажмите кнопку ниже чтобы поделиться своим контактом:"
+        "Отправьте номер телефона в ответном сообщении в формате +7XXXXXXXXXX."
     )
-    # Встроенная кнопка Telegram для запроса контакта
-    kb = {
-        "keyboard": [
-            [{"text": "📱 Поделиться контактом", "request_contact": True}]
-        ],
-        "one_time_keyboard": True,
-        "resize_keyboard": True
-    }
-    return text, kb
+    return text, {"force_reply": True}
 
 
 def ask_name(chat_id: str, user_id: str) -> Tuple[str, dict]:

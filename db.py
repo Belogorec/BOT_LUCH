@@ -3,6 +3,7 @@ import json
 import csv
 import sqlite3
 from contextlib import contextmanager
+from typing import Optional
 
 DB_PATH = os.environ.get("DB_PATH", "./data/luchbar.db").strip()
 
@@ -94,6 +95,7 @@ def init_schema(conn: sqlite3.Connection):
           utm_term            TEXT,
           status              TEXT NOT NULL DEFAULT 'WAITING',
           guest_segment       TEXT,
+          reservation_token   TEXT,
           telegram_chat_id    TEXT,
           telegram_message_id TEXT,
           raw_payload_json    TEXT,
@@ -103,6 +105,9 @@ def init_schema(conn: sqlite3.Connection):
 
         CREATE INDEX IF NOT EXISTS idx_bookings_phone ON bookings(phone_e164);
         CREATE INDEX IF NOT EXISTS idx_bookings_resdt ON bookings(reservation_dt);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_reservation_token
+          ON bookings(reservation_token)
+          WHERE reservation_token IS NOT NULL;
 
         -- ===== booking_events =====
         CREATE TABLE IF NOT EXISTS booking_events (
@@ -193,13 +198,34 @@ def init_schema(conn: sqlite3.Connection):
           uploaded_by TEXT,
           uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+
+        -- ===== processed_tg_updates =====
+        CREATE TABLE IF NOT EXISTS processed_tg_updates (
+          update_id          INTEGER PRIMARY KEY,
+          update_type        TEXT,
+          chat_id            TEXT,
+          message_id         TEXT,
+          callback_query_id  TEXT,
+          created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_processed_tg_updates_created_at
+          ON processed_tg_updates(created_at);
         """
     )
 
     _ensure_column(conn, "guests", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "bookings", "user_chat_id", "TEXT")
+    _ensure_column(conn, "bookings", "reservation_token", "TEXT")
     _ensure_column(conn, "tg_bot_users", "has_shared_phone", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "tg_bot_users", "phone_e164", "TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_reservation_token
+          ON bookings(reservation_token)
+          WHERE reservation_token IS NOT NULL
+        """
+    )
 
 
 def rebuild_guests_from_visits(conn: sqlite3.Connection):
@@ -268,7 +294,7 @@ def set_tags(conn: sqlite3.Connection, phone_e164: str, tags: list[str]):
     )
 
 
-def seed_discount_codes_from_csv(conn: sqlite3.Connection, csv_path: str | None = None) -> int:
+def seed_discount_codes_from_csv(conn: sqlite3.Connection, csv_path: Optional[str] = None) -> int:
   """
   Загружает promo-коды из CSV в таблицу discount_codes.
   CSV ожидается в формате: code,qr_link[,discount_percent].

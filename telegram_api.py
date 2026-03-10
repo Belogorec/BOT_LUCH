@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 import requests
 
 from config import TG_API
@@ -31,7 +32,7 @@ def tg_post(method: str, data: dict):
     return payload
 
 
-def tg_send_message(chat_id: str, text: str, reply_markup: dict | None = None, parse_mode: str = "HTML"):
+def tg_send_message(chat_id: str, text: str, reply_markup: Optional[dict] = None, parse_mode: str = "HTML"):
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -45,7 +46,7 @@ def tg_send_message(chat_id: str, text: str, reply_markup: dict | None = None, p
     return (data.get("result") or {}).get("message_id")
 
 
-def tg_edit_message(chat_id: str, message_id: str, text: str, reply_markup: dict | None = None, parse_mode: str = "HTML"):
+def tg_edit_message(chat_id: str, message_id: str, text: str, reply_markup: Optional[dict] = None, parse_mode: str = "HTML"):
     payload = {
         "chat_id": chat_id,
         "message_id": message_id,
@@ -66,7 +67,7 @@ def tg_answer_callback(callback_query_id: str, text: str = ""):
     tg_post("answerCallbackQuery", payload)
 
 
-def tg_send_photo(chat_id: str, file_id: str, caption: str | None = None, reply_markup: dict | None = None, parse_mode: str = "HTML"):
+def tg_send_photo(chat_id: str, file_id: str, caption: Optional[str] = None, reply_markup: Optional[dict] = None, parse_mode: str = "HTML"):
     payload = {
         "chat_id": chat_id,
         "photo": file_id,

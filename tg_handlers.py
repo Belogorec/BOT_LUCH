@@ -1,4 +1,5 @@
 import html
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta
@@ -45,55 +46,39 @@ def ensure_db():
     return conn
 
 
-def build_booking_keyboard():
-    """Reply keyboard с кнопкой Mini App бронирования.
-    Только через этот тип кнопки работает sendData / message.web_app_data.
-    """
-    return {
-        "keyboard": [
-            [{"text": "🍸 Забронировать", "web_app": {"url": MINIAPP_URL}}]
-        ],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
-    }
-
-
 def build_luch_main_menu():
-    """Inline keyboard для навигации по разделам бара.
-    Кнопка Забронировать стоит первой — открывает Mini App.
-    """
     return {
         "inline_keyboard": [
             [
                 {
                     "text": "🍸 Забронировать",
-                    "web_app": {"url": MINIAPP_URL}
+                    "web_app": {"url": MINIAPP_URL},
                 },
                 {
                     "text": "📖 Меню",
-                    "url": "https://barluch.ru/osnovnoe-menu"
+                    "url": "https://barluch.ru/osnovnoe-menu",
                 },
             ],
             [
                 {
                     "text": "🎧 Line-up",
-                    "callback_data": "lineup"
+                    "callback_data": "lineup",
                 },
                 {
                     "text": "✨ О Луче",
-                    "callback_data": "about_luch"
+                    "callback_data": "about_luch",
                 },
             ],
             [
                 {
                     "text": "📍 Контакты",
-                    "callback_data": "contacts_luch"
+                    "callback_data": "contacts_luch",
                 },
                 {
                     "text": "🥂 Банкеты",
-                    "url": "https://barluch.ru/banket"
-                }
-            ]
+                    "url": "https://barluch.ru/banket",
+                },
+            ],
         ]
     }
 
@@ -141,8 +126,63 @@ def tg_webhook_impl():
 
     update = request.get_json(silent=True) or {}
 
+    update_id = update.get("update_id")
+    update_type = "unknown"
+    chat_id_dbg = ""
+    message_id_dbg = ""
+    callback_query_id_dbg = ""
+    if "callback_query" in update:
+        update_type = "callback_query"
+        cq_dbg = update.get("callback_query") or {}
+        callback_query_id_dbg = str(cq_dbg.get("id") or "")
+        msg_dbg = cq_dbg.get("message") or {}
+        message_id_dbg = str(msg_dbg.get("message_id") or "")
+        chat_id_dbg = str((msg_dbg.get("chat") or {}).get("id") or "")
+    elif "message" in update:
+        update_type = "message"
+        m_dbg = update.get("message") or {}
+        message_id_dbg = str(m_dbg.get("message_id") or "")
+        chat_id_dbg = str((m_dbg.get("chat") or {}).get("id") or "")
+
+    print(
+        "[TG-WEBHOOK] "
+        f"update_id={update_id} "
+        f"type={update_type} "
+        f"chat_id={chat_id_dbg} "
+        f"message_id={message_id_dbg} "
+        f"callback_query_id={callback_query_id_dbg}",
+        flush=True,
+    )
+
     conn = ensure_db()
     try:
+        if isinstance(update_id, int):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO processed_tg_updates
+                (update_id, update_type, chat_id, message_id, callback_query_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (update_id, update_type, chat_id_dbg, message_id_dbg, callback_query_id_dbg),
+            )
+            inserted = conn.execute("SELECT changes() AS c").fetchone()
+            if inserted and int(inserted["c"] or 0) == 0:
+                recent_rows = conn.execute(
+                    """
+                    SELECT update_id
+                    FROM processed_tg_updates
+                    ORDER BY created_at DESC, update_id DESC
+                    LIMIT 20
+                    """
+                ).fetchall()
+                recent_ids = [str(r["update_id"]) for r in recent_rows]
+                print(
+                    "[TG-WEBHOOK] duplicate update ignored "
+                    f"update_id={update_id} recent={','.join(recent_ids)}",
+                    flush=True,
+                )
+                return {"ok": True}
+
         if "callback_query" in update:
             cq = update["callback_query"] or {}
             cq_id = str(cq.get("id") or "")
@@ -360,15 +400,12 @@ def tg_webhook_impl():
                         (actor_id, actor_name, name or first_name, phone),
                     )
                     
-                    # Показываем reply keyboard с кнопкой бронирования (KeyboardButton web_app)
-                    # и отдельно inline-навигацию по разделам
                     tg_send_message(
                         chat_id,
                         "✅ <b>Спасибо за контакт!</b>\n\n"
-                        "Кнопка <b>Забронировать</b> теперь доступна в нижней панели.",
-                        build_booking_keyboard(),
+                        "Используйте кнопку <b>Забронировать</b> в меню ниже.",
+                        build_luch_main_menu(),
                     )
-                    tg_send_message(chat_id, "Разделы LUCH:", build_luch_main_menu())
 
                 conn.commit()
                 return {"ok": True}
@@ -392,6 +429,23 @@ def tg_webhook_impl():
                 time_value = str(payload.get("time") or "").strip()
                 guests_value = str(payload.get("guests") or "").strip()
                 comment_value = str(payload.get("comment") or "").strip()
+                reservation_token = str(
+                    payload.get("reservation_token")
+                    or payload.get("request_id")
+                    or ""
+                ).strip()
+                if not reservation_token:
+                    reservation_token = hashlib.sha256(
+                        f"{actor_id}|{chat_id}|{date_value}|{time_value}|{guests_value}|{comment_value}".encode("utf-8")
+                    ).hexdigest()
+
+                existing_booking = conn.execute(
+                    "SELECT id FROM bookings WHERE reservation_token=?",
+                    (reservation_token,),
+                ).fetchone()
+                if existing_booking:
+                    tg_send_message(chat_id, "Заявка уже принята в обработку.")
+                    return {"ok": True}
 
                 if not date_value or not time_value or not guests_value:
                     tg_send_message(chat_id, "Форма заполнена не полностью. Откройте её ещё раз.")
@@ -422,6 +476,7 @@ def tg_webhook_impl():
                     "requester_chat_id": chat_id,
                     "requester_tg_user_id": actor_id,
                     "requester_name": saved_name or actor_name,
+                    "reservation_token": reservation_token,
                     "date": date_value,
                     "time": time_value,
                     "guests": guests_count,
@@ -449,10 +504,11 @@ def tg_webhook_impl():
                         utm_term,
                         status,
                         guest_segment,
+                        reservation_token,
                         raw_payload_json
                     )
                     VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?)
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
                     """,
                     (
                         None,
@@ -471,6 +527,7 @@ def tg_webhook_impl():
                         None,
                         None,
                         "NEW" if phone_e164 else "NEW",
+                        reservation_token,
                         json.dumps(raw_payload, ensure_ascii=False),
                     ),
                 )
@@ -599,21 +656,34 @@ def tg_webhook_impl():
                     except Exception:
                         pass
                     if _valid:
-                        _booking_id = int(_note_row["booking_id"])
-                        _phone = str(_note_row["phone_e164"] or "")
-                        add_guest_note(conn, _phone, text, actor_id, actor_name)
+                        booking_id = int(_note_row["booking_id"])
+                        phone = str(_note_row["phone_e164"] or "")
+
+                        add_guest_note(conn, phone, text, actor_id, actor_name)
                         conn.execute("DELETE FROM pending_replies WHERE id=?", (_note_row["id"],))
-                        _b = conn.execute(
-                            "SELECT telegram_chat_id, telegram_message_id FROM bookings WHERE id=?",
-                            (_booking_id,),
-                        ).fetchone()
-                        if _b and _b["telegram_chat_id"] and _b["telegram_message_id"]:
-                            _card_text, _card_kb = render_booking_card(conn, _booking_id)
-                            tg_edit_message(
-                                str(_b["telegram_chat_id"]),
-                                str(_b["telegram_message_id"]),
-                                _card_text, _card_kb,
-                            )
+
+                        try:
+                            text_card, kb_card = render_booking_card(conn, booking_id)
+
+                            booking_row = conn.execute(
+                                """
+                                SELECT telegram_chat_id, telegram_message_id
+                                FROM bookings
+                                WHERE id=?
+                                """,
+                                (booking_id,),
+                            ).fetchone()
+
+                            if booking_row and booking_row["telegram_chat_id"] and booking_row["telegram_message_id"]:
+                                tg_edit_message(
+                                    str(booking_row["telegram_chat_id"]),
+                                    str(booking_row["telegram_message_id"]),
+                                    text_card,
+                                    kb_card,
+                                )
+                        except Exception:
+                            pass
+
                         tg_send_message(chat_id, "Комментарий к гостю сохранён.")
                         return {"ok": True}
 
@@ -648,14 +718,7 @@ def tg_webhook_impl():
                         "Будем рады видеть вас в LUCHBAR."
                     )
 
-                    inline_rows = [
-                        [
-                            {
-                                "text": "🍸 Забронировать стол",
-                                "url": "https://barluch.ru/reserve"
-                            }
-                        ]
-                    ]
+                    inline_rows = []
 
                     if actor_id in PROMO_ADMIN_IDS:
                         inline_rows.append(
@@ -667,6 +730,7 @@ def tg_webhook_impl():
                             ]
                         )
 
+                    inline_rows.extend(build_luch_main_menu().get("inline_keyboard", []))
                     kb = {"inline_keyboard": inline_rows}
                     tg_send_message(chat_id, text_msg, kb)
                     return {"ok": True}
@@ -680,30 +744,19 @@ def tg_webhook_impl():
                 has_phone = user_row and user_row["has_shared_phone"]
 
                 if not has_phone:
-                    # Просим поделиться контактом
-                    contact_text = (
+                    tg_send_message(
+                        chat_id,
                         "👋 <b>Добро пожаловать в LUCHBAR!</b>\n\n"
-                        "Для бронирования нам нужен ваш номер телефона.\n"
-                        "Пожалуйста, нажмите кнопку ниже:"
+                        "Используйте меню ниже для бронирования и навигации.",
+                        build_luch_main_menu(),
                     )
-                    contact_kb = {
-                        "keyboard": [
-                            [{"text": "📱 Поделиться контактом", "request_contact": True}]
-                        ],
-                        "one_time_keyboard": True,
-                        "resize_keyboard": True
-                    }
-                    tg_send_message(chat_id, contact_text, contact_kb)
                 else:
-                    # Reply keyboard с кнопкой бронирования (KeyboardButton web_app — sendData работает только отсюда)
-                    # + отдельно inline-навигация по разделам
                     tg_send_message(
                         chat_id,
                         "🍸 <b>LUCHBAR</b>\n\n"
-                        "Кнопка <b>Забронировать</b> доступна в нижней панели.",
-                        build_booking_keyboard(),
+                        "Используйте кнопку <b>Забронировать</b> в меню ниже.",
+                        build_luch_main_menu(),
                     )
-                    tg_send_message(chat_id, "Разделы:", build_luch_main_menu())
                 
                 return {"ok": True}
 

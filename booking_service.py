@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 from datetime import datetime
 
 from db import get_tags, set_tags
@@ -65,7 +66,7 @@ def upsert_guest_if_missing(conn, phone_e164: str, name_last: str):
     )
 
 
-def log_booking_event(conn, booking_id: int, event_type: str, actor_id: str, actor_name: str, payload: dict | None = None):
+def log_booking_event(conn, booking_id: int, event_type: str, actor_id: str, actor_name: str, payload: Optional[dict] = None):
     conn.execute(
         """
         INSERT INTO booking_events (booking_id, event_type, actor_tg_id, actor_name, payload_json)
@@ -75,7 +76,7 @@ def log_booking_event(conn, booking_id: int, event_type: str, actor_id: str, act
     )
 
 
-def log_guest_event(conn, phone_e164: str, event_type: str, actor_id: str, actor_name: str, payload: dict | None = None):
+def log_guest_event(conn, phone_e164: str, event_type: str, actor_id: str, actor_name: str, payload: Optional[dict] = None):
     conn.execute(
         """
         INSERT INTO guest_events (phone_e164, event_type, actor_tg_id, actor_name, payload_json)

@@ -1,4 +1,5 @@
 import re
+import hashlib
 
 import json
 import urllib.parse
@@ -565,6 +566,28 @@ def miniapp_reserve():
       dateInput.addEventListener("change", applyConstraints);
       timeInput.addEventListener("change", applyConstraints);
 
+      function makeReservationToken() {
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+          return window.crypto.randomUUID();
+        }
+        return "req-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+      }
+
+      function getReservationToken() {
+        const key = "luch_reservation_token";
+        let token = "";
+        try {
+          token = sessionStorage.getItem(key) || "";
+          if (!token) {
+            token = makeReservationToken();
+            sessionStorage.setItem(key, token);
+          }
+        } catch (_) {
+          token = makeReservationToken();
+        }
+        return token;
+      }
+
       form.addEventListener("submit", function (e) {
         e.preventDefault();
 
@@ -577,6 +600,7 @@ def miniapp_reserve():
           time: timeInput.value,
           guests: guestsInput.value,
           comment: (commentInput.value || "").trim(),
+          reservation_token: getReservationToken(),
           initData: (tg && tg.initData) ? tg.initData : ""
         };
 
@@ -590,6 +614,7 @@ def miniapp_reserve():
         .then(function (r) { return r.json(); })
         .then(function (result) {
           if (result.ok) {
+            try { sessionStorage.removeItem("luch_reservation_token"); } catch (_) {}
             showOk("Заявка отправлена ✓");
             setTimeout(function () {
               if (tg && typeof tg.close === "function") {
@@ -667,6 +692,16 @@ def api_submit_booking():
   time_value = str(data.get("time") or "").strip()
   guests_value = str(data.get("guests") or "").strip()
   comment_value = str(data.get("comment") or "").strip()
+  reservation_token = str(
+    data.get("reservation_token")
+    or data.get("request_id")
+    or data.get("reservationRequestId")
+    or ""
+  ).strip()
+  if not reservation_token:
+    reservation_token = hashlib.sha256(
+      f"{tg_user_id}|{date_value}|{time_value}|{guests_value}|{comment_value}".encode("utf-8")
+    ).hexdigest()
 
   if not date_value or not time_value or not guests_value:
     return {"ok": False, "error": "Форма заполнена не полностью"}, 400
@@ -699,11 +734,20 @@ def api_submit_booking():
       "requester_tg_user_id": tg_user_id,
       "requester_chat_id": tg_user_id,
       "requester_name": saved_name,
+      "reservation_token": reservation_token,
       "date": date_value,
       "time": time_value,
       "guests": guests_count,
       "comment": comment_value,
     }, ensure_ascii=False)
+
+    existing = conn.execute(
+      "SELECT id FROM bookings WHERE reservation_token=?",
+      (reservation_token,),
+    ).fetchone()
+    if existing:
+      existing_id = int(existing["id"])
+      return {"ok": True, "booking_id": existing_id, "duplicate": True}
 
     cur = conn.execute(
       """
@@ -712,8 +756,8 @@ def api_submit_booking():
        reservation_date, reservation_time, reservation_dt,
        guests_count, comment,
        utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-       status, guest_segment, raw_payload_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?)
+       status, guest_segment, reservation_token, raw_payload_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
       """,
       (
         None,
@@ -728,6 +772,7 @@ def api_submit_booking():
         comment_value,
         "telegram", "miniapp", None, None, None,
         "NEW",
+        reservation_token,
         raw_payload,
       ),
     )
@@ -757,14 +802,10 @@ def api_submit_booking():
 
 @app.after_request
 def _admin_api_cors(resp):
-  if (
-    request.path.startswith("/admin/api/")
-    or request.path.startswith("/public/api/")
-    or request.path.startswith("/api/booking")
-  ):
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    if request.path.startswith("/admin/api/") or request.path.startswith("/public/api/"):
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return resp
 
 
