@@ -488,6 +488,8 @@ def tg_webhook_impl():
                 text, kb = render_booking_card(conn, booking_id)
                 try:
                     msg_id = tg_send_message(str(TG_CHAT_ID), text, kb)
+                    if not msg_id:
+                        raise RuntimeError("Telegram sendMessage returned empty message_id")
                 except Exception as e:
                     log_booking_event(
                         conn,
@@ -698,6 +700,39 @@ def tg_webhook_impl():
                         lines.append(f"• {code} — {redeemed_at} — админ {admin_id}")
 
                 tg_send_message(chat_id, "\n".join(lines))
+                return {"ok": True}
+
+            if cmd == "/testadminchat":
+                if actor_id not in PROMO_ADMIN_IDS:
+                    tg_send_message(chat_id, "Нет доступа.")
+                    return {"ok": True}
+
+                admin_chat_id = str(TG_CHAT_ID or "").strip()
+                if not admin_chat_id:
+                    tg_send_message(
+                        chat_id,
+                        "TG_CHAT_ID пустой.\nПроверь переменную окружения на сервере."
+                    )
+                    return {"ok": True}
+
+                try:
+                    test_message_id = tg_send_message(
+                        admin_chat_id,
+                        "🧪 Тестовое сообщение\n\nПроверка отправки в чат администраторов."
+                    )
+                    tg_send_message(
+                        chat_id,
+                        "Тест отправки выполнен успешно.\n\n"
+                        f"TG_CHAT_ID: <code>{_h(admin_chat_id)}</code>\n"
+                        f"message_id: <code>{_h(str(test_message_id))}</code>"
+                    )
+                except Exception as e:
+                    tg_send_message(
+                        chat_id,
+                        "Ошибка отправки в чат администраторов.\n\n"
+                        f"TG_CHAT_ID: <code>{_h(admin_chat_id)}</code>\n"
+                        f"Ошибка: <code>{_h(str(e))}</code>"
+                    )
                 return {"ok": True}
 
             if cmd == "/set_lineup":
