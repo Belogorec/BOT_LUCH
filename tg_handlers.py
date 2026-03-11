@@ -44,6 +44,13 @@ def ensure_db():
     return connect()
 
 
+def safe_answer_callback(callback_query_id: str, text: str = ""):
+    try:
+        tg_answer_callback(callback_query_id, text)
+    except Exception as e:
+        print(f"[TG-WEBHOOK] answerCallbackQuery failed: id={callback_query_id} error={e}", flush=True)
+
+
 def build_luch_main_menu():
     return {
         "inline_keyboard": [
@@ -194,19 +201,18 @@ def tg_webhook_impl():
             chat_id = str(chat.get("id") or "")
             message_id = str(msg.get("message_id") or "")
 
+            # Acknowledge quickly so Telegram doesn't keep spinner on cold starts.
+            safe_answer_callback(cq_id)
+
             if data == "about_luch":
-                tg_answer_callback(cq_id)
                 tg_send_message(chat_id, get_luch_info_text("about_luch"), reply_markup=build_luch_main_menu())
                 return {"ok": True}
 
             if data == "contacts_luch":
-                tg_answer_callback(cq_id)
                 tg_send_message(chat_id, get_luch_info_text("contacts_luch"), reply_markup=build_luch_main_menu())
                 return {"ok": True}
 
             if data == "lineup":
-                tg_answer_callback(cq_id)
-
                 lineup_row = conn.execute(
                     "SELECT file_id, caption FROM lineup_posters ORDER BY id DESC LIMIT 1"
                 ).fetchone()
@@ -223,7 +229,7 @@ def tg_webhook_impl():
                 code = data.replace("promo:redeem:", "", 1).strip()
 
                 if actor_id not in PROMO_ADMIN_IDS:
-                    tg_answer_callback(cq_id, "Нет доступа")
+                    safe_answer_callback(cq_id, "Нет доступа")
                     return {"ok": True}
 
                 row = conn.execute(
@@ -232,11 +238,11 @@ def tg_webhook_impl():
                 ).fetchone()
 
                 if not row:
-                    tg_answer_callback(cq_id, "Карта не найдена")
+                    safe_answer_callback(cq_id, "Карта не найдена")
                     return {"ok": True}
 
                 if row["status"] == "USED":
-                    tg_answer_callback(cq_id, "Карта уже использована")
+                    safe_answer_callback(cq_id, "Карта уже использована")
                     tg_send_message(chat_id, f"❌ Карта <b>{_h(code)}</b> уже была использована ранее.")
                     return {"ok": True}
 
@@ -251,7 +257,7 @@ def tg_webhook_impl():
                     (actor_id, code),
                 )
 
-                tg_answer_callback(cq_id, "Скидка проведена")
+                safe_answer_callback(cq_id, "Скидка проведена")
                 tg_send_message(chat_id, f"✅ Скидка по карте <b>{_h(code)}</b> проведена.")
                 return {"ok": True}
 
@@ -264,7 +270,7 @@ def tg_webhook_impl():
                     (booking_id,),
                 ).fetchone()
                 if not b:
-                    tg_answer_callback(cq_id, "Бронь не найдена")
+                    safe_answer_callback(cq_id, "Бронь не найдена")
                     return {"ok": True}
 
                 phone = b["phone_e164"] or ""
@@ -273,12 +279,12 @@ def tg_webhook_impl():
 
                 if parts[2] == "visits":
                     if not phone:
-                        tg_answer_callback(cq_id, "Нет телефона у брони")
+                        safe_answer_callback(cq_id, "Нет телефона у брони")
                         return {"ok": True}
 
                     visits_msg = render_guest_visits_message(conn, phone)
                     tg_send_message(chat_id, visits_msg)
-                    tg_answer_callback(cq_id, "История отправлена")
+                    safe_answer_callback(cq_id, "История отправлена")
                     return {"ok": True}
 
                 if parts[2] == "booking" and len(parts) >= 4:
@@ -309,7 +315,7 @@ def tg_webhook_impl():
 
                         text, kb = render_booking_card(conn, booking_id)
                         tg_edit_message(chat_id, message_id, text, kb)
-                        tg_answer_callback(cq_id, "Подтверждено")
+                        safe_answer_callback(cq_id, "Подтверждено")
                         return {"ok": True}
 
                     if action == "cancel":
@@ -331,12 +337,12 @@ def tg_webhook_impl():
 
                         text, kb = render_booking_card(conn, booking_id)
                         tg_edit_message(chat_id, message_id, text, kb)
-                        tg_answer_callback(cq_id, "Отменено")
+                        safe_answer_callback(cq_id, "Отменено")
                         return {"ok": True}
 
                 if parts[2] == "note":
                     if not phone:
-                        tg_answer_callback(cq_id, "Нет телефона у брони")
+                        safe_answer_callback(cq_id, "Нет телефона у брони")
                         return {"ok": True}
 
                     prompt_text = (
@@ -358,10 +364,10 @@ def tg_webhook_impl():
                         (booking_id, phone, chat_id, actor_id, str(prompt_msg_id), expires),
                     )
 
-                    tg_answer_callback(cq_id, "Ожидаю текст")
+                        safe_answer_callback(cq_id, "Ожидаю текст")
                     return {"ok": True}
 
-            tg_answer_callback(cq_id)
+                    safe_answer_callback(cq_id)
             return {"ok": True}
 
         if "message" in update:
