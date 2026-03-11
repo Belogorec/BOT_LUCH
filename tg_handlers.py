@@ -364,10 +364,10 @@ def tg_webhook_impl():
                         (booking_id, phone, chat_id, actor_id, str(prompt_msg_id), expires),
                     )
 
-                        safe_answer_callback(cq_id, "Ожидаю текст")
+                    safe_answer_callback(cq_id, "Ожидаю текст")
                     return {"ok": True}
 
-                    safe_answer_callback(cq_id)
+                safe_answer_callback(cq_id)
             return {"ok": True}
 
         if "message" in update:
