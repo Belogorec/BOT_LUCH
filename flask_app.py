@@ -725,6 +725,7 @@ def api_submit_booking():
   from booking_render import render_booking_card
   from telegram_api import tg_send_message as _tg_send
   from config import TG_CHAT_ID
+  from crm_sync import send_booking_event
 
   conn = ensure_db()
   try:
@@ -760,12 +761,12 @@ def api_submit_booking():
     cur = conn.execute(
       """
       INSERT INTO bookings
-      (tranid, formname, name, phone_e164, phone_raw,
+      (tranid, formname, name, phone_e164, phone_raw, user_chat_id,
        reservation_date, reservation_time, reservation_dt,
        guests_count, comment,
        utm_source, utm_medium, utm_campaign, utm_content, utm_term,
        status, guest_segment, reservation_token, raw_payload_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
       """,
       (
         None,
@@ -773,6 +774,7 @@ def api_submit_booking():
         saved_name or "Telegram",
         phone_e164,
         phone_e164,
+        tg_user_id,
         date_value,
         time_value,
         f"{date_value} {time_value}:00",
@@ -799,6 +801,22 @@ def api_submit_booking():
           log_booking_event(conn, booking_id, "TG_SYNC_OK", "system", "system", {"target_chat_id": str(TG_CHAT_ID)})
       except Exception as e:
         log_booking_event(conn, booking_id, "TG_SYNC_FAIL", "system", "system", {"error": str(e)})
+
+    try:
+      sync_ok = send_booking_event(
+        conn,
+        booking_id,
+        "BOOKING_UPSERT",
+        {
+          "actor_tg_id": tg_user_id or "system",
+          "actor_name": saved_name or "telegram_miniapp_api",
+          "payload": {"source": "telegram_miniapp_api"},
+        },
+      )
+      if not sync_ok:
+        log_booking_event(conn, booking_id, "CRM_SYNC_FAIL", "system", "system", {"source": "telegram_miniapp_api", "reason": "send_booking_event_false"})
+    except Exception as e:
+      log_booking_event(conn, booking_id, "CRM_SYNC_FAIL", "system", "system", {"source": "telegram_miniapp_api", "reason": str(e)})
 
     conn.commit()
     return {"ok": True, "booking_id": booking_id}
