@@ -11,6 +11,7 @@ from booking_service import (
     log_booking_event,
 )
 from booking_render import render_booking_card
+from crm_sync import send_booking_event
 from db import connect, get_tags
 
 
@@ -208,6 +209,20 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
             log_booking_event(conn, booking_id, "CREATED", "system", "system", {"source": "tilda"})
 
         conn.commit()
+
+        try:
+            send_booking_event(
+                conn,
+                booking_id,
+                "BOOKING_UPSERT",
+                {
+                    "actor_tg_id": "system",
+                    "actor_name": "tilda",
+                    "payload": {"source": "tilda", "tg_status": tg_status},
+                },
+            )
+        except Exception:
+            pass
 
         try:
             text, kb = render_booking_card(conn, booking_id)

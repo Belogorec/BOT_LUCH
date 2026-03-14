@@ -45,6 +45,9 @@ TILDA_SECRET = os.getenv("TILDA_SECRET", "").strip()
 TG_WEBHOOK_SECRET = os.getenv("TG_WEBHOOK_SECRET", "").strip()
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "").strip()
 ANALYTICS_TZ_OFFSET_HOURS = int(os.getenv("ANALYTICS_TZ_OFFSET_HOURS", "3").strip() or "3")
+CRM_API_URL = os.getenv("CRM_API_URL", "").strip()
+CRM_API_KEY = os.getenv("CRM_API_KEY", "").strip()
+CRM_SYNC_TIMEOUT = int(os.getenv("CRM_SYNC_TIMEOUT", "8").strip() or "8")
 CRM_AUTH_CONFIRM_URL = os.getenv(
     "CRM_AUTH_CONFIRM_URL",
     "https://luchcrm-production.up.railway.app/api/auth/confirm-code",

@@ -36,6 +36,7 @@ from booking_render import (
     render_booking_card,
     render_guest_visits_message,
 )
+from crm_sync import send_booking_event
 from db import connect
 
 MINIAPP_URL = os.environ.get(
@@ -365,6 +366,19 @@ def tg_webhook_impl():
 
                         text, kb = render_booking_card(conn, booking_id)
                         tg_edit_message(chat_id, message_id, text, kb)
+                        try:
+                            send_booking_event(
+                                conn,
+                                booking_id,
+                                "BOOKING_STATUS_CONFIRMED",
+                                {
+                                    "actor_tg_id": actor_id,
+                                    "actor_name": actor_name,
+                                    "payload": {"status": "CONFIRMED"},
+                                },
+                            )
+                        except Exception:
+                            pass
                         safe_answer_callback(cq_id, "Подтверждено")
                         return {"ok": True}
 
@@ -387,6 +401,19 @@ def tg_webhook_impl():
 
                         text, kb = render_booking_card(conn, booking_id)
                         tg_edit_message(chat_id, message_id, text, kb)
+                        try:
+                            send_booking_event(
+                                conn,
+                                booking_id,
+                                "BOOKING_STATUS_CANCELLED",
+                                {
+                                    "actor_tg_id": actor_id,
+                                    "actor_name": actor_name,
+                                    "payload": {"status": "CANCELLED"},
+                                },
+                            )
+                        except Exception:
+                            pass
                         safe_answer_callback(cq_id, "Отменено")
                         return {"ok": True}
 
@@ -678,6 +705,19 @@ def tg_webhook_impl():
                     "Сообщение о подтверждении придёт сюда после проверки."
                 )
                 tg_send_message(chat_id, waiting_text)
+                try:
+                    send_booking_event(
+                        conn,
+                        booking_id,
+                        "BOOKING_UPSERT",
+                        {
+                            "actor_tg_id": actor_id,
+                            "actor_name": actor_name,
+                            "payload": {"source": "telegram_miniapp"},
+                        },
+                    )
+                except Exception:
+                    pass
                 return {"ok": True}
 
             text = (m.get("text") or "").strip()
@@ -738,6 +778,19 @@ def tg_webhook_impl():
                             pass
 
                         tg_send_message(chat_id, "Комментарий к гостю сохранён.")
+                        try:
+                            send_booking_event(
+                                conn,
+                                booking_id,
+                                "BOOKING_NOTE_ADDED",
+                                {
+                                    "actor_tg_id": actor_id,
+                                    "actor_name": actor_name,
+                                    "guest_note": text,
+                                },
+                            )
+                        except Exception:
+                            pass
                         return {"ok": True}
 
             if cmd == "/start":
