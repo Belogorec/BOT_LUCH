@@ -362,7 +362,12 @@ def tg_webhook_impl():
                                 "Ваш стол подтвержден.\n"
                                 "Ждём вас в LUCHBAR."
                             )
-                            tg_send_message(requester_chat_id, notify_text)
+                            notify_kb = {
+                                "inline_keyboard": [
+                                    [{"text": "❌ Отменить бронь", "callback_data": f"b:{booking_id}:booking:cancel_guest"}]
+                                ]
+                            }
+                            tg_send_message(requester_chat_id, notify_text, notify_kb)
 
                         text, kb = render_booking_card(conn, booking_id)
                         tg_edit_message(chat_id, message_id, text, kb)
@@ -415,6 +420,56 @@ def tg_webhook_impl():
                         except Exception:
                             pass
                         safe_answer_callback(cq_id, "Отменено")
+                        return {"ok": True}
+
+                    if action == "cancel_guest":
+                        mark_booking_cancelled(conn, booking_id, actor_id, actor_name)
+
+                        # убираем кнопку у гостя
+                        tg_edit_message(
+                            chat_id,
+                            message_id,
+                            "❌ <b>Бронь отменена</b>\n\nЕсли хотите забронировать снова — используйте кнопку ниже.",
+                            build_luch_main_menu(),
+                        )
+
+                        # уведомляем администраторов отдельным сообщением
+                        if TG_CHAT_ID:
+                            try:
+                                brow = conn.execute(
+                                    "SELECT name, phone_e164, reservation_date, reservation_time, guests_count FROM bookings WHERE id=?",
+                                    (booking_id,),
+                                ).fetchone()
+                                guest_name = _h(str(brow["name"] or "—")) if brow else "—"
+                                guest_phone = _h(str(brow["phone_e164"] or "—")) if brow else "—"
+                                res_date = _h(str(brow["reservation_date"] or "—")) if brow else "—"
+                                res_time = _h(str(brow["reservation_time"] or "—")) if brow else "—"
+                                guests_cnt = _h(str(brow["guests_count"] or "—")) if brow else "—"
+                                admin_notify = (
+                                    f"❌ <b>Гость отменил бронь #{booking_id}</b>\n\n"
+                                    f"Гость: {guest_name}\n"
+                                    f"Телефон: {guest_phone}\n"
+                                    f"Дата: {res_date} {res_time}\n"
+                                    f"Гостей: {guests_cnt}"
+                                )
+                                tg_send_message(str(TG_CHAT_ID), admin_notify)
+                            except Exception:
+                                pass
+
+                        try:
+                            send_booking_event(
+                                conn,
+                                booking_id,
+                                "BOOKING_STATUS_CANCELLED",
+                                {
+                                    "actor_tg_id": actor_id,
+                                    "actor_name": actor_name,
+                                    "payload": {"status": "CANCELLED", "source": "guest"},
+                                },
+                            )
+                        except Exception:
+                            pass
+                        safe_answer_callback(cq_id, "Бронь отменена")
                         return {"ok": True}
 
                 if parts[2] == "note":
