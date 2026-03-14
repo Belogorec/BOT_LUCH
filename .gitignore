@@ -28,3 +28,5 @@ data/
 config.py.html
 tg_handlers_backup.py
 CRM-example/guestsluch.csv
+
+guestsluch_temp.csv
