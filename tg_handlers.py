@@ -4,10 +4,18 @@ import json
 import os
 import traceback
 from datetime import datetime, timedelta
+import requests
 
 from flask import request, abort
 
-from config import TG_WEBHOOK_SECRET, PROMO_ADMIN_IDS, TG_CHAT_ID
+from config import (
+    TG_WEBHOOK_SECRET,
+    PROMO_ADMIN_IDS,
+    TG_CHAT_ID,
+    BOT_TOKEN,
+    CRM_AUTH_CONFIRM_URL,
+    CRM_AUTH_TIMEOUT_SEC,
+)
 from telegram_api import (
     tg_send_message,
     tg_edit_message,
@@ -38,6 +46,48 @@ MINIAPP_URL = os.environ.get(
 
 def _h(s: str) -> str:
     return html.escape(s or "", quote=False)
+
+
+def _normalize_auth_code(raw: str) -> str:
+    code = (raw or "").strip().upper()
+    if not code:
+        return ""
+    if not code.startswith("AUTH-"):
+        code = f"AUTH-{code}"
+    return code
+
+
+def _confirm_crm_auth(code: str, telegram_id: str) -> tuple[bool, str]:
+    if not CRM_AUTH_CONFIRM_URL:
+        return False, "CRM auth URL не настроен"
+    if not BOT_TOKEN:
+        return False, "BOT_TOKEN не настроен"
+
+    try:
+        resp = requests.post(
+            CRM_AUTH_CONFIRM_URL,
+            json={
+                "code": code,
+                "telegram_id": int(telegram_id),
+                "bot_token": BOT_TOKEN,
+            },
+            timeout=max(3, int(CRM_AUTH_TIMEOUT_SEC)),
+        )
+    except Exception as exc:
+        return False, f"ошибка соединения с CRM: {exc}"
+
+    if not resp.ok:
+        return False, f"CRM вернула HTTP {resp.status_code}"
+
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+
+    if payload.get("ok") is True:
+        return True, "ok"
+
+    return False, str(payload.get("error") or "неподтвержденный или истекший код")
 
 
 def ensure_db():
@@ -693,6 +743,29 @@ def tg_webhook_impl():
             if cmd == "/start":
                 parts = text.split()
 
+                if len(parts) > 1 and parts[1].startswith("auth_"):
+                    code_raw = parts[1].replace("auth_", "", 1)
+                    code = _normalize_auth_code(code_raw)
+                    if not code:
+                        tg_send_message(chat_id, "Код авторизации не распознан. Откройте CRM и получите новый код.")
+                        return {"ok": True}
+
+                    ok, msg = _confirm_crm_auth(code, actor_id)
+                    if ok:
+                        tg_send_message(
+                            chat_id,
+                            "✅ <b>Вход подтвержден</b>\n\n"
+                            "Вернитесь в окно CRM, страница войдет автоматически.",
+                        )
+                    else:
+                        tg_send_message(
+                            chat_id,
+                            "❌ Не удалось подтвердить вход.\n"
+                            f"Причина: <code>{_h(msg)}</code>\n\n"
+                            "Получите новый код в CRM и повторите попытку.",
+                        )
+                    return {"ok": True}
+
                 if len(parts) > 1 and parts[1].startswith("promo_"):
                     code = parts[1].replace("promo_", "").strip()
 
@@ -762,6 +835,31 @@ def tg_webhook_impl():
                         build_luch_main_menu(),
                     )
                     return {"ok": True}
+
+            if cmd == "/auth":
+                parts = text.split(maxsplit=1)
+                code = _normalize_auth_code(parts[1] if len(parts) > 1 else "")
+                if not code:
+                    tg_send_message(
+                        chat_id,
+                        "Используйте формат: <code>/auth AUTH-XXXXXX</code>",
+                    )
+                    return {"ok": True}
+
+                ok, msg = _confirm_crm_auth(code, actor_id)
+                if ok:
+                    tg_send_message(
+                        chat_id,
+                        "✅ <b>Вход подтвержден</b>\n\n"
+                        "Вернитесь в окно CRM, страница войдет автоматически.",
+                    )
+                else:
+                    tg_send_message(
+                        chat_id,
+                        "❌ Не удалось подтвердить вход.\n"
+                        f"Причина: <code>{_h(msg)}</code>",
+                    )
+                return {"ok": True}
 
             if cmd == "/myid":
                 is_admin = actor_id in PROMO_ADMIN_IDS
@@ -962,7 +1060,7 @@ def tg_webhook_impl():
                     """,
                     (actor_id,),
                 ).fetchone()
-                if pending_lineup and cmd != "/set_lineup":
+                if pending_lineup and not cmd:
                     tg_send_message(chat_id, "Пожалуйста, отправьте изображение афиши (как фото).")
                     return {"ok": True}
 

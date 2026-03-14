@@ -45,6 +45,11 @@ TILDA_SECRET = os.getenv("TILDA_SECRET", "").strip()
 TG_WEBHOOK_SECRET = os.getenv("TG_WEBHOOK_SECRET", "").strip()
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "").strip()
 ANALYTICS_TZ_OFFSET_HOURS = int(os.getenv("ANALYTICS_TZ_OFFSET_HOURS", "3").strip() or "3")
+CRM_AUTH_CONFIRM_URL = os.getenv(
+    "CRM_AUTH_CONFIRM_URL",
+    "https://luchcrm-production.up.railway.app/api/auth/confirm-code",
+).strip()
+CRM_AUTH_TIMEOUT_SEC = int(os.getenv("CRM_AUTH_TIMEOUT_SEC", "8").strip() or "8")
 
 # Supports: "12345,67890", "12345 67890", JSON list, or single PROMO_ADMIN_ID.
 _admins_multi = _parse_admin_ids(os.getenv("PROMO_ADMIN_IDS", ""))
