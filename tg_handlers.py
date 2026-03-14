@@ -572,6 +572,7 @@ def tg_webhook_impl():
                         name,
                         phone_e164,
                         phone_raw,
+                        user_chat_id,
                         reservation_date,
                         reservation_time,
                         reservation_dt,
@@ -596,6 +597,7 @@ def tg_webhook_impl():
                         saved_name or actor_name or "Telegram",
                         phone_e164,
                         phone_e164,
+                        chat_id,
                         date_value,
                         time_value,
                         f"{date_value} {time_value}:00",
@@ -706,7 +708,7 @@ def tg_webhook_impl():
                 )
                 tg_send_message(chat_id, waiting_text)
                 try:
-                    send_booking_event(
+                    sync_ok = send_booking_event(
                         conn,
                         booking_id,
                         "BOOKING_UPSERT",
@@ -716,8 +718,24 @@ def tg_webhook_impl():
                             "payload": {"source": "telegram_miniapp"},
                         },
                     )
+                    if not sync_ok:
+                        log_booking_event(
+                            conn,
+                            booking_id,
+                            "CRM_SYNC_FAIL",
+                            "system",
+                            "system",
+                            {"source": "telegram_miniapp", "reason": "send_booking_event_false"},
+                        )
                 except Exception:
-                    pass
+                    log_booking_event(
+                        conn,
+                        booking_id,
+                        "CRM_SYNC_FAIL",
+                        "system",
+                        "system",
+                        {"source": "telegram_miniapp", "reason": "send_booking_event_exception"},
+                    )
                 return {"ok": True}
 
             text = (m.get("text") or "").strip()

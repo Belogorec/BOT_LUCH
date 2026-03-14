@@ -1,4 +1,5 @@
 import json
+import time
 import traceback
 from typing import Any, Optional
 
@@ -82,15 +83,27 @@ def send_booking_event(conn, booking_id: int, event_name: str, meta: Optional[di
     if CRM_API_KEY:
         headers["X-CRM-API-Key"] = CRM_API_KEY
 
-    try:
-        response = _session.post(
-            CRM_API_URL,
-            json=payload,
-            headers=headers,
-            timeout=max(3, int(CRM_SYNC_TIMEOUT)),
-        )
-        response.raise_for_status()
-        return True
-    except Exception:
-        traceback.print_exc()
-        return False
+    max_attempts = 3
+    timeout = max(3, int(CRM_SYNC_TIMEOUT))
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = _session.post(
+                CRM_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return True
+        except Exception as exc:
+            print(
+                f"[CRM_SYNC] booking_id={booking_id} event={event_name} "
+                f"attempt={attempt}/{max_attempts} failed: {exc}",
+                flush=True,
+            )
+            traceback.print_exc()
+            if attempt < max_attempts:
+                time.sleep(attempt)
+
+    return False

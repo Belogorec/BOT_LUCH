@@ -211,7 +211,7 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
         conn.commit()
 
         try:
-            send_booking_event(
+            sync_ok = send_booking_event(
                 conn,
                 booking_id,
                 "BOOKING_UPSERT",
@@ -221,8 +221,24 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
                     "payload": {"source": "tilda", "tg_status": tg_status},
                 },
             )
+            if not sync_ok:
+                log_booking_event(
+                    conn,
+                    booking_id,
+                    "CRM_SYNC_FAIL",
+                    "system",
+                    "system",
+                    {"source": "tilda", "reason": "send_booking_event_false"},
+                )
         except Exception:
-            pass
+            log_booking_event(
+                conn,
+                booking_id,
+                "CRM_SYNC_FAIL",
+                "system",
+                "system",
+                {"source": "tilda", "reason": "send_booking_event_exception"},
+            )
 
         try:
             text, kb = render_booking_card(conn, booking_id)
