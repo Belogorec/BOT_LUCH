@@ -482,8 +482,12 @@ def tg_webhook_impl():
                     
                     tg_send_message(
                         chat_id,
-                        "✅ <b>Спасибо за контакт!</b>\n\n"
-                        "Используйте кнопку <b>Забронировать</b> в меню ниже.",
+                        "✅ <b>Спасибо!</b> Контакт сохранён.",
+                        {"remove_keyboard": True},
+                    )
+                    tg_send_message(
+                        chat_id,
+                        "<b>LUCHBAR</b>\n\nВыберите нужный раздел ниже.",
                         build_luch_main_menu(),
                     )
 
@@ -894,9 +898,17 @@ def tg_webhook_impl():
                     contact_text = (
                         "<b>Добро пожаловать в LUCHBAR!</b>\n\n"
                         "Для бронирования нам нужен ваш номер телефона.\n"
-                        "Отправьте его в ответном сообщении в формате +7XXXXXXXXXX."
+                        "Нажмите кнопку ниже, чтобы поделиться контактом."
                     )
-                    tg_send_message(chat_id, contact_text, {"force_reply": True})
+                    tg_send_message(
+                        chat_id,
+                        contact_text,
+                        {
+                            "keyboard": [[{"text": "📱 Поделиться номером", "request_contact": True}]],
+                            "resize_keyboard": True,
+                            "one_time_keyboard": True,
+                        },
+                    )
                     return {"ok": True}
                 else:
                     tg_send_message(
