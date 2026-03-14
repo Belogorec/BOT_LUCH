@@ -466,7 +466,7 @@ def tg_webhook_impl():
 
                 if phone:
                     # Сохраняем контакт в базу
-                    upsert_guest_if_missing(conn, phone, name)
+                    upsert_guest_if_missing(conn, phone, name, overwrite_name=True)
                     
                     # Сохраняем в tg_bot_users что у этого юзера есть телефон
                     conn.execute(

@@ -43,18 +43,29 @@ def get_guest_visits_full(conn, phone_e164: str):
     return visits
 
 
-def upsert_guest_if_missing(conn, phone_e164: str, name_last: str):
+def upsert_guest_if_missing(conn, phone_e164: str, name_last: str, overwrite_name: bool = False):
     row = conn.execute("SELECT phone_e164 FROM guests WHERE phone_e164=?", (phone_e164,)).fetchone()
     if row:
-        conn.execute(
-            """
-            UPDATE guests
-            SET name_last = CASE WHEN (name_last IS NULL OR trim(name_last)='') THEN ? ELSE name_last END,
-                updated_at=datetime('now')
-            WHERE phone_e164=?
-            """,
-            (name_last, phone_e164),
-        )
+        if overwrite_name and (name_last or "").strip():
+            conn.execute(
+                """
+                UPDATE guests
+                SET name_last = ?,
+                    updated_at=datetime('now')
+                WHERE phone_e164=?
+                """,
+                (name_last.strip(), phone_e164),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE guests
+                SET name_last = CASE WHEN (name_last IS NULL OR trim(name_last)='') THEN ? ELSE name_last END,
+                    updated_at=datetime('now')
+                WHERE phone_e164=?
+                """,
+                (name_last, phone_e164),
+            )
         return
 
     conn.execute(
@@ -62,7 +73,7 @@ def upsert_guest_if_missing(conn, phone_e164: str, name_last: str):
         INSERT INTO guests (phone_e164, name_last, visits_count, first_visit_dt, last_visit_dt, tags_json)
         VALUES (?, ?, 0, NULL, NULL, '[]')
         """,
-        (phone_e164, name_last),
+        (phone_e164, (name_last or "").strip()),
     )
 
 
