@@ -29,9 +29,21 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
         payload = request.form.to_dict(flat=True)
     payload = payload or {}
 
+    def normalize_payload_key(v):
+        s = str(v or "").strip().lower().replace("ё", "е")
+        return re.sub(r"[^0-9a-zа-я]+", "", s)
+
+    normalized_payload = {}
+    for k, v in payload.items():
+        nk = normalize_payload_key(k)
+        if nk and nk not in normalized_payload:
+            normalized_payload[nk] = v
+
     def pick(*keys, default=""):
         for k in keys:
             v = payload.get(k)
+            if v is None:
+                v = normalized_payload.get(normalize_payload_key(k))
             if v is not None:
                 s = str(v).strip()
                 if s:
@@ -43,7 +55,10 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
         if not raw:
             return None
         m = re.search(r"\d+", raw)
-        return int(m.group(0)) if m else None
+        if not m:
+            return None
+        value = int(m.group(0))
+        return value if 1 <= value <= 50 else None
 
     name = normalize_name(
         pick(
@@ -77,10 +92,45 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
     time_raw = normalize_time_hhmm(time_raw_src)
 
     guests_count = pick_int_from_text(
-        "amountofguests", "guests", "Guests", "guests_count",
+        "amountofguests", "guests", "Guests", "guests_count", "guestscount",
+        "guest_count", "guestcount", "number_of_guests", "guests_number",
+        "persons", "people", "qty", "count",
+        "kolichestvogostey", "kolichestvogostei",
         "Количество гостей", "количество гостей",
+        "Количествогостей", "количествогостеи", "количествогостеи",
         "Гостей", "гостей"
     )
+
+    if guests_count is None:
+        for k, v in payload.items():
+            key_norm = normalize_payload_key(k)
+            if not key_norm:
+                continue
+
+            looks_like_guest_count = (
+                key_norm in {
+                    "гостей",
+                    "гости",
+                    "guests",
+                    "guestscount",
+                    "guestcount",
+                    "persons",
+                    "people",
+                }
+                or ("guest" in key_norm and any(token in key_norm for token in ("count", "qty", "amount", "number", "num")))
+                or ("гост" in key_norm and any(token in key_norm for token in ("кол", "числ", "сколь")))
+            )
+            if not looks_like_guest_count:
+                continue
+
+            raw_val = str(v or "").strip()
+            m = re.search(r"\d+", raw_val)
+            if not m:
+                continue
+            parsed = int(m.group(0))
+            if 1 <= parsed <= 50:
+                guests_count = parsed
+                break
 
     comment = pick(
         "comment", "Comment", "Comments",
