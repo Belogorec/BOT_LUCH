@@ -173,7 +173,8 @@ def _format_table_conflict_message(conflicts: dict, table_number: int) -> str:
     lines = [f"⚠️ Стол <b>#{table_number}</b> уже занят или ограничен."]
     restricted = conflicts.get("restricted")
     if restricted:
-        until = _h(str(restricted.get("restricted_until") or "—"))
+        until_raw = str(restricted.get("restricted_until") or "—")
+        until = _h(until_raw[11:16] if len(until_raw) >= 16 else until_raw)
         lines.append(f"Ограничение действует до: <code>{until}</code>")
     for item in conflicts.get("booking_conflicts") or []:
         lines.append(
@@ -181,6 +182,13 @@ def _format_table_conflict_message(conflicts: dict, table_number: int) -> str:
         )
     lines.append("Подтвердите override отдельной кнопкой или выберите другой стол.")
     return "\n".join(lines)
+
+
+def _display_restriction_time(value: str) -> str:
+    raw = str(value or "").strip()
+    if len(raw) >= 16:
+        return raw[11:16]
+    return raw or "—"
 
 
 def build_luch_main_menu():
@@ -646,11 +654,11 @@ def tg_webhook_impl():
                                 (
                                     f"<b>Ограничить стол</b>\nБронь #{booking_id}\n"
                                     f"Стол #{assigned_table}\n\n"
-                                    "Напишите время окончания ограничения.\n"
-                                    "Пример: <code>2026-03-21 23:30</code> или <code>21.03 23:30</code>"
+                                    "Напишите, на сколько часов поставить ограничение.\n"
+                                    "Пример: <code>2</code> или <code>5</code>"
                                 ),
                             )
-                            safe_answer_callback(cq_id, "Жду время ограничения")
+                            safe_answer_callback(cq_id, "Жду часы ограничения")
                         else:
                             _create_pending_reply(
                                 conn,
@@ -687,10 +695,10 @@ def tg_webhook_impl():
                             (
                                 f"<b>Ограничить стол с override</b>\nБронь #{booking_id}\n"
                                 f"Стол #{table_number}\n\n"
-                                "Напишите новое время окончания ограничения."
+                                "Напишите, на сколько часов поставить ограничение."
                             ),
                         )
-                        safe_answer_callback(cq_id, "Жду время ограничения")
+                        safe_answer_callback(cq_id, "Жду часы ограничения")
                         return {"ok": True}
 
                 if parts[2] == "note":
@@ -1126,8 +1134,8 @@ def tg_webhook_impl():
                                 (
                                     "<b>Ограничение стола</b>\n"
                                     f"{target}Стол #{table_number}\n\n"
-                                    "Напишите время окончания ограничения.\n"
-                                    "Пример: <code>2026-03-21 23:30</code> или <code>21.03 23:30</code>"
+                                    "Напишите, на сколько часов поставить ограничение.\n"
+                                    "Пример: <code>2</code> или <code>5</code>"
                                 ).strip(),
                             )
                             return {"ok": True}
@@ -1140,7 +1148,7 @@ def tg_webhook_impl():
                                 tg_send_message(chat_id, "Не удалось определить стол. Начните заново.")
                                 return {"ok": True}
                             if not restricted_until:
-                                tg_send_message(chat_id, "Время должно быть в будущем. Пример: 2026-03-21 23:30")
+                                tg_send_message(chat_id, "Нужно указать положительное число часов. Пример: 3")
                                 return {"ok": True}
 
                             try:
@@ -1219,7 +1227,7 @@ def tg_webhook_impl():
                                     pass
                             tg_send_message(
                                 chat_id,
-                                f"✅ Стол #{result['table_number']} ограничен до <code>{_h(result['restricted_until'])}</code>.",
+                                f"✅ Стол #{result['table_number']} ограничен до <code>{_h(_display_restriction_time(result['restricted_until']))}</code>.",
                             )
                             return {"ok": True}
 
@@ -1636,7 +1644,7 @@ def tg_webhook_impl():
                 lines = ["<b>Активные ограничения столов</b>"]
                 for row in rows:
                     lines.append(
-                        f"• Стол #{row['table_number']} до <code>{_h(row['restricted_until'])}</code>"
+                        f"• Стол #{row['table_number']} до <code>{_h(_display_restriction_time(row['restricted_until']))}</code>"
                     )
                 tg_send_message(chat_id, "\n".join(lines))
                 return {"ok": True}

@@ -15,6 +15,17 @@ from config import BOT_TOKEN
 from db import connect, run_migrations, seed_discount_codes_from_csv
 from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
+from telegram_api import tg_edit_message
+from booking_render import render_booking_card
+from booking_service import (
+    assign_table_to_booking,
+    clear_table_assignment,
+    ensure_visit_from_confirmed_booking,
+    log_booking_event,
+    mark_booking_cancelled,
+    normalize_table_number,
+    set_table_label,
+)
 
 app = Flask(__name__)
 
@@ -76,6 +87,45 @@ def ensure_db():
   return connect()
 
 
+def _crm_sync_authorized(req) -> bool:
+    payload = req.get_json(silent=True) or {}
+    incoming = str(req.headers.get("X-Bot-Token") or payload.get("bot_token") or "").strip()
+    return bool(BOT_TOKEN) and incoming == BOT_TOKEN
+
+
+def _refresh_admin_booking_card(conn, booking_id: int) -> None:
+    row = conn.execute(
+        "SELECT telegram_chat_id, telegram_message_id FROM bookings WHERE id=?",
+        (booking_id,),
+    ).fetchone()
+    if not row or not row["telegram_chat_id"] or not row["telegram_message_id"]:
+        return
+    text, kb = render_booking_card(conn, booking_id)
+    tg_edit_message(str(row["telegram_chat_id"]), str(row["telegram_message_id"]), text, kb)
+
+
+def _crm_set_booking_status(conn, booking_id: int, status: str, actor_id: str, actor_name: str) -> None:
+    normalized = str(status or "").strip().upper()
+    if normalized == "CANCELLED":
+        mark_booking_cancelled(conn, booking_id, actor_id, actor_name)
+        return
+
+    event_type = {
+        "CONFIRMED": "CONFIRMED",
+        "DECLINED": "DECLINED",
+        "NO_SHOW": "NO_SHOW",
+        "COMPLETED": "COMPLETED",
+        "WAITING": "WAITING",
+    }.get(normalized, "STATUS_CHANGED")
+    conn.execute(
+        "UPDATE bookings SET status=?, updated_at=datetime('now') WHERE id=?",
+        (normalized, booking_id),
+    )
+    log_booking_event(conn, booking_id, event_type, actor_id, actor_name, {"source": "crm"})
+    if normalized == "CONFIRMED":
+        ensure_visit_from_confirmed_booking(conn, booking_id, actor_id, actor_name)
+
+
 def validate_telegram_init_data(init_data_str: str) -> tuple[bool, dict]:
     raw = (init_data_str or "").strip()
     if not raw or not BOT_TOKEN:
@@ -120,6 +170,157 @@ def bootstrap_schema():
     conn.commit()
   finally:
     conn.close()
+
+
+@app.route("/admin/api/crm-sync/booking/<int:booking_id>", methods=["POST"])
+def crm_sync_booking(booking_id: int):
+    if not _crm_sync_authorized(request):
+        return {"ok": False, "error": "forbidden"}, 403
+
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "").strip().lower()
+    data = payload.get("payload") or {}
+    actor_id = str(payload.get("actor_tg_id") or "crm")
+    actor_name = str(payload.get("actor_name") or "crm")
+
+    conn = connect()
+    try:
+        exists = conn.execute("SELECT id FROM bookings WHERE id=?", (booking_id,)).fetchone()
+        if not exists:
+            return {"ok": False, "error": "booking_not_found"}, 404
+
+        if action == "confirm":
+            _crm_set_booking_status(conn, booking_id, "CONFIRMED", actor_id, actor_name)
+        elif action == "decline":
+            _crm_set_booking_status(conn, booking_id, "DECLINED", actor_id, actor_name)
+        elif action == "cancel":
+            _crm_set_booking_status(conn, booking_id, "CANCELLED", actor_id, actor_name)
+        elif action == "no_show":
+            _crm_set_booking_status(conn, booking_id, "NO_SHOW", actor_id, actor_name)
+        elif action == "complete":
+            _crm_set_booking_status(conn, booking_id, "COMPLETED", actor_id, actor_name)
+        elif action == "reschedule":
+            reservation_date = str(data.get("reservation_date") or "").strip()
+            reservation_time = normalize_time_hhmm(data.get("reservation_time") or "")
+            if not (reservation_date and reservation_time):
+                return {"ok": False, "error": "reservation_date_and_time_required"}, 400
+            conn.execute(
+                """
+                UPDATE bookings
+                SET reservation_date=?, reservation_time=?, reservation_dt=?, updated_at=datetime('now')
+                WHERE id=?
+                """,
+                (reservation_date, reservation_time, f"{reservation_date}T{reservation_time}", booking_id),
+            )
+            log_booking_event(conn, booking_id, "RESCHEDULED", actor_id, actor_name, {"source": "crm"})
+        elif action == "update_guests":
+            try:
+                guests_count = int(str(data.get("guests_count") or "").strip())
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "invalid_guests_count"}, 400
+            conn.execute(
+                "UPDATE bookings SET guests_count=?, updated_at=datetime('now') WHERE id=?",
+                (guests_count, booking_id),
+            )
+            log_booking_event(conn, booking_id, "GUESTS_UPDATED", actor_id, actor_name, {"source": "crm"})
+        elif action == "assign_table":
+            table_number = normalize_table_number(data.get("table_number"))
+            if not table_number:
+                return {"ok": False, "error": "invalid_table_number"}, 400
+            assign_table_to_booking(
+                conn,
+                booking_id,
+                table_number,
+                actor_id,
+                actor_name,
+                force_override=str(data.get("force_override") or "").strip() == "1",
+            )
+        elif action == "clear_table":
+            clear_table_assignment(conn, booking_id, actor_id, actor_name)
+        elif action == "restrict_table":
+            table_number = normalize_table_number(data.get("table_number"))
+            if not table_number:
+                current = conn.execute("SELECT assigned_table_number FROM bookings WHERE id=?", (booking_id,)).fetchone()
+                table_number = normalize_table_number(current["assigned_table_number"] if current else None)
+            if not table_number:
+                return {"ok": False, "error": "invalid_table_number"}, 400
+            set_table_label(
+                conn,
+                table_number,
+                "RESTRICTED",
+                actor_id,
+                actor_name,
+                restricted_until=str(data.get("restricted_until") or "").strip(),
+                restriction_comment=str(data.get("table_comment") or "").strip(),
+                booking_id=booking_id,
+                force_override=str(data.get("force_override") or "").strip() == "1",
+            )
+        elif action == "clear_table_restriction":
+            current = conn.execute("SELECT assigned_table_number FROM bookings WHERE id=?", (booking_id,)).fetchone()
+            table_number = normalize_table_number(data.get("table_number") or (current["assigned_table_number"] if current else None))
+            if not table_number:
+                return {"ok": False, "error": "invalid_table_number"}, 400
+            set_table_label(conn, table_number, "NONE", actor_id, actor_name, booking_id=booking_id)
+        else:
+            return {"ok": False, "error": "action_not_supported"}, 400
+
+        conn.commit()
+        try:
+            _refresh_admin_booking_card(conn, booking_id)
+        except Exception:
+            pass
+        return {"ok": True, "booking_id": booking_id}, 200
+    except ValueError as exc:
+        conn.rollback()
+        return {"ok": False, "error": str(exc)}, 400
+    except Exception as exc:
+        conn.rollback()
+        return {"ok": False, "error": str(exc)}, 500
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/crm-sync/table", methods=["POST"])
+def crm_sync_table():
+    if not _crm_sync_authorized(request):
+        return {"ok": False, "error": "forbidden"}, 403
+
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "").strip().lower()
+    data = payload.get("payload") or {}
+    actor_id = str(payload.get("actor_tg_id") or "crm")
+    actor_name = str(payload.get("actor_name") or "crm")
+    table_number = normalize_table_number(data.get("table_number"))
+    if not table_number:
+        return {"ok": False, "error": "invalid_table_number"}, 400
+
+    conn = connect()
+    try:
+        if action == "clear_table_restriction":
+            set_table_label(conn, table_number, "NONE", actor_id, actor_name)
+        elif action == "set_table_label":
+            set_table_label(
+                conn,
+                table_number,
+                str(data.get("table_label") or "").strip().upper(),
+                actor_id,
+                actor_name,
+                restricted_until=str(data.get("restricted_until") or "").strip(),
+                restriction_comment=str(data.get("table_comment") or "").strip(),
+                force_override=str(data.get("force_override") or "").strip() == "1",
+            )
+        else:
+            return {"ok": False, "error": "action_not_supported"}, 400
+        conn.commit()
+        return {"ok": True, "table_number": table_number}, 200
+    except ValueError as exc:
+        conn.rollback()
+        return {"ok": False, "error": str(exc)}, 400
+    except Exception as exc:
+        conn.rollback()
+        return {"ok": False, "error": str(exc)}, 500
+    finally:
+        conn.close()
 
 
 bootstrap_schema()

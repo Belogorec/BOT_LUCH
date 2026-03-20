@@ -1,6 +1,6 @@
 import json
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from db import get_tags, set_tags
 
@@ -180,6 +180,15 @@ def parse_restriction_until(value: str) -> Optional[str]:
     raw = str(value or "").strip()
     if not raw:
         return None
+
+    try:
+        hours = int(raw)
+    except (TypeError, ValueError):
+        hours = 0
+
+    if hours > 0:
+        base = datetime.now().replace(minute=0, second=0, microsecond=0)
+        return (base + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
 
     candidates = [
         "%Y-%m-%d %H:%M",
