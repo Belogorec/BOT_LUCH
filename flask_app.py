@@ -1,5 +1,6 @@
 import re
 import hashlib
+import hmac
 
 import json
 import urllib.parse
@@ -10,6 +11,7 @@ from dashboard_api import (
     admin_api_segments_impl,
     admin_api_load_impl,
 )
+from config import BOT_TOKEN
 from db import connect, run_migrations, seed_discount_codes_from_csv
 from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
@@ -72,6 +74,42 @@ def normalize_phone_e164(raw: str, default_region: str = "RU") -> str:
 
 def ensure_db():
   return connect()
+
+
+def validate_telegram_init_data(init_data_str: str) -> tuple[bool, dict]:
+    raw = (init_data_str or "").strip()
+    if not raw or not BOT_TOKEN:
+        return False, {}
+
+    pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
+    data: dict[str, str] = {}
+    received_hash = ""
+
+    for key, value in pairs:
+        if key == "hash":
+            received_hash = value
+            continue
+        data[key] = value
+
+    if not received_hash:
+        return False, {}
+
+    data_check_string = "\n".join(f"{key}={data[key]}" for key in sorted(data))
+    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+    computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(computed_hash, received_hash):
+        return False, {}
+
+    user_obj = {}
+    try:
+        parsed_user = json.loads(data.get("user") or "{}")
+        if isinstance(parsed_user, dict):
+            user_obj = parsed_user
+    except Exception:
+        user_obj = {}
+
+    return True, {"fields": data, "user": user_obj}
 
 
 def bootstrap_schema():
@@ -685,18 +723,14 @@ def api_submit_booking():
 
   data = request.get_json(silent=True) or {}
 
-  # Извлекаем tg_user_id из initData (строка URL-encoded из Telegram.WebApp.initData)
   init_data_str = (data.get("initData") or "").strip()
-  tg_user_id = ""
-  if init_data_str:
-    for part in init_data_str.split("&"):
-      if part.startswith("user="):
-        try:
-          user_obj = json.loads(urllib.parse.unquote(part[5:]))
-          tg_user_id = str(user_obj.get("id") or "")
-        except Exception:
-          pass
-        break
+  init_ok, init_payload = validate_telegram_init_data(init_data_str)
+  if not init_ok:
+    return {"ok": False, "error": "Некорректные данные Telegram Mini App"}, 403
+
+  tg_user_id = str(((init_payload.get("user") or {}).get("id")) or "").strip()
+  if not tg_user_id:
+    return {"ok": False, "error": "Не удалось определить пользователя Telegram"}, 400
 
   date_value = str(data.get("date") or "").strip()
   time_value = str(data.get("time") or "").strip()
