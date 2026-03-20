@@ -1017,6 +1017,8 @@ def tg_webhook_impl():
                 return {"ok": True}
 
             if cmd == "/stat":
+                print(f"[/STAT] actor_id={actor_id}, PROMO_ADMIN_IDS={PROMO_ADMIN_IDS}", flush=True)
+                
                 if actor_id not in PROMO_ADMIN_IDS:
                     error_msg = (
                         "❌ Доступ запрещён\n\n"
