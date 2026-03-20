@@ -918,26 +918,28 @@ def tg_webhook_impl():
                         "🎁 <b>Подарочная карта LUCHBAR</b>\n\n"
                         "Ваша карта активна.\n\n"
                         "Скидка: <b>15%</b>\n"
-                        "Действует до: <b>31 мая</b>\n\n"
+                        "Действует до: <b>31 марта</b>\n\n"
                         "Вы можете воспользоваться скидкой "
                         "один раз, предъявив открытку с QR-кодом официанту.\n\n"
                         "Будем рады видеть вас в LUCHBAR."
                     )
 
-                    inline_rows = []
-
                     if actor_id in PROMO_ADMIN_IDS:
-                        inline_rows.append(
-                            [
-                                {
-                                    "text": "✅ Провести скидку",
-                                    "callback_data": f"promo:redeem:{code}"
-                                }
+                        # Для админов только кнопка "Провести скидку"
+                        kb = {
+                            "inline_keyboard": [
+                                [
+                                    {
+                                        "text": "✅ Провести скидку",
+                                        "callback_data": f"promo:redeem:{code}"
+                                    }
+                                ]
                             ]
-                        )
+                        }
+                    else:
+                        # Для гостей меню с основными функциями
+                        kb = build_luch_main_menu()
 
-                    inline_rows.extend(build_luch_main_menu().get("inline_keyboard", []))
-                    kb = {"inline_keyboard": inline_rows}
                     tg_send_message(chat_id, text_msg, kb)
                     return {"ok": True}
 
