@@ -3,13 +3,19 @@ from typing import Optional
 from datetime import datetime, timedelta
 
 from db import get_tags, set_tags
+from config import BUSINESS_TZ_OFFSET_HOURS
 
 TABLE_LABELS = {"NONE", "DEPOSIT", "RESTRICTED"}
 INACTIVE_BOOKING_STATUSES = {"DECLINED", "CANCELLED", "NO_SHOW"}
+BUSINESS_NOW_SQL = f"{BUSINESS_TZ_OFFSET_HOURS:+d} hours"
 
 
 def now_iso_seconds_utc() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
+
+
+def business_now() -> datetime:
+    return datetime.utcnow() + timedelta(hours=BUSINESS_TZ_OFFSET_HOURS)
 
 
 def compute_segment(visits_count: int, tags: list[str] = None) -> str:
@@ -187,7 +193,7 @@ def parse_restriction_until(value: str) -> Optional[str]:
         hours = 0
 
     if hours > 0:
-        base = datetime.now().replace(minute=0, second=0, microsecond=0)
+        base = business_now().replace(minute=0, second=0, microsecond=0)
         return (base + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
 
     candidates = [
@@ -200,7 +206,7 @@ def parse_restriction_until(value: str) -> Optional[str]:
     ]
 
     parsed_dt = None
-    now = datetime.now()
+    now = business_now()
     for fmt in candidates:
         try:
             parsed_dt = datetime.strptime(raw, fmt)
@@ -236,9 +242,9 @@ def get_active_table_restrictions(conn):
         FROM venue_tables
         WHERE label = 'RESTRICTED'
           AND restricted_until IS NOT NULL
-          AND datetime(restricted_until) > datetime('now')
+          AND datetime(restricted_until) > datetime('now', '{BUSINESS_NOW_SQL}')
         ORDER BY datetime(restricted_until) ASC, table_number ASC
-        """
+        """.format(BUSINESS_NOW_SQL=BUSINESS_NOW_SQL)
     ).fetchall()
 
 
@@ -268,9 +274,9 @@ def get_table_assignment_conflicts(conn, booking_row, table_number: int, exclude
         WHERE table_number = ?
           AND label = 'RESTRICTED'
           AND restricted_until IS NOT NULL
-          AND datetime(restricted_until) > datetime('now')
+          AND datetime(restricted_until) > datetime('now', '{BUSINESS_NOW_SQL}')
         LIMIT 1
-        """,
+        """.format(BUSINESS_NOW_SQL=BUSINESS_NOW_SQL),
         (int(table_number),),
     ).fetchone()
     return {
