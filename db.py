@@ -96,6 +96,7 @@ def init_schema(conn: sqlite3.Connection):
           status              TEXT NOT NULL DEFAULT 'WAITING',
           guest_segment       TEXT,
           reservation_token   TEXT,
+          assigned_table_number INTEGER,
           telegram_chat_id    TEXT,
           telegram_message_id TEXT,
           raw_payload_json    TEXT,
@@ -119,6 +120,36 @@ def init_schema(conn: sqlite3.Connection):
         );
 
         CREATE INDEX IF NOT EXISTS idx_booking_events_booking ON booking_events(booking_id);
+
+        -- ===== venue_tables =====
+        CREATE TABLE IF NOT EXISTS venue_tables (
+          table_number       INTEGER PRIMARY KEY,
+          label              TEXT NOT NULL DEFAULT 'NONE',
+          restricted_until   TEXT,
+          restriction_comment TEXT,
+          updated_by         TEXT,
+          updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_venue_tables_label ON venue_tables(label);
+        CREATE INDEX IF NOT EXISTS idx_venue_tables_restricted_until ON venue_tables(restricted_until);
+
+        -- ===== table_events =====
+        CREATE TABLE IF NOT EXISTS table_events (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          table_number   INTEGER NOT NULL,
+          booking_id     INTEGER,
+          event_type     TEXT NOT NULL,
+          actor_tg_id    TEXT,
+          actor_name     TEXT,
+          payload_json   TEXT,
+          created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (booking_id) REFERENCES bookings(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_table_events_table ON table_events(table_number, created_at);
+        CREATE INDEX IF NOT EXISTS idx_table_events_booking ON table_events(booking_id, created_at);
 
         -- ===== guest_notes =====
         CREATE TABLE IF NOT EXISTS guest_notes (
@@ -214,6 +245,7 @@ def init_schema(conn: sqlite3.Connection):
     _ensure_column(conn, "guests", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "bookings", "user_chat_id", "TEXT")
     _ensure_column(conn, "bookings", "reservation_token", "TEXT")
+    _ensure_column(conn, "bookings", "assigned_table_number", "INTEGER")
     _ensure_column(conn, "tg_bot_users", "has_shared_phone", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "tg_bot_users", "phone_e164", "TEXT")
     conn.execute(

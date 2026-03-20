@@ -49,6 +49,7 @@ def render_booking_card(conn, booking_id: int) -> tuple[str, dict]:
 
     comment = (b["comment"] or "").strip()
     comment_line = f"<b>Комментарий к брони:</b> {_h(comment) if comment else '—'}"
+    table_line = f"<b>Стол:</b> {_h(str(b['assigned_table_number'])) if b['assigned_table_number'] else '—'}"
 
     # Блок заметок о госте (если есть)
     notes_block = ""
@@ -75,6 +76,8 @@ def render_booking_card(conn, booking_id: int) -> tuple[str, dict]:
         seg_line,
         vc_line,
         "",
+        table_line,
+        "",
         comment_line,
     ]
     
@@ -96,8 +99,15 @@ def render_booking_card(conn, booking_id: int) -> tuple[str, dict]:
                 btn("❌ Отменить бронь", f"b:{booking_id}:booking:cancel"),
             ],
             [
-                btn("✍️ Комментарий к гостю", f"b:{booking_id}:note"),
+                btn("🪑 Назначить стол", f"b:{booking_id}:table:assign"),
+                btn("🧹 Снять стол", f"b:{booking_id}:table:clear"),
+            ],
+            [
+                btn("⛔ Ограничить стол", f"b:{booking_id}:table:restrict"),
                 btn("📋 История визитов", f"b:{booking_id}:visits"),
+            ],
+            [
+                btn("✍️ Комментарий к гостю", f"b:{booking_id}:note"),
             ],
         ]
     }

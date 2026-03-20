@@ -4,6 +4,9 @@ from datetime import datetime
 
 from db import get_tags, set_tags
 
+TABLE_LABELS = {"NONE", "DEPOSIT", "RESTRICTED"}
+INACTIVE_BOOKING_STATUSES = {"DECLINED", "CANCELLED", "NO_SHOW"}
+
 
 def now_iso_seconds_utc() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
@@ -87,6 +90,31 @@ def log_booking_event(conn, booking_id: int, event_type: str, actor_id: str, act
     )
 
 
+def log_table_event(
+    conn,
+    table_number: int,
+    event_type: str,
+    actor_id: str,
+    actor_name: str,
+    payload: Optional[dict] = None,
+    booking_id: Optional[int] = None,
+):
+    conn.execute(
+        """
+        INSERT INTO table_events (table_number, booking_id, event_type, actor_tg_id, actor_name, payload_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(table_number),
+            booking_id,
+            event_type,
+            actor_id,
+            actor_name,
+            json.dumps(payload or {}, ensure_ascii=False),
+        ),
+    )
+
+
 def log_guest_event(conn, phone_e164: str, event_type: str, actor_id: str, actor_name: str, payload: Optional[dict] = None):
     conn.execute(
         """
@@ -127,6 +155,283 @@ def toggle_guest_tag(conn, phone_e164: str, tag: str) -> tuple[list[str], str]:
     tags2 = sorted(s)
     set_tags(conn, phone_e164, tags2)
     return tags2, action
+
+
+def normalize_table_number(value) -> Optional[int]:
+    try:
+        table_number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return table_number if table_number > 0 else None
+
+
+def _booking_reservation_dt(booking_row) -> str:
+    res_dt = str((booking_row["reservation_dt"] or "")).strip()
+    if res_dt:
+        return res_dt
+    rd = str((booking_row["reservation_date"] or "")).strip()
+    rt = str((booking_row["reservation_time"] or "")).strip()
+    if rd and rt:
+        return f"{rd}T{rt}"
+    return ""
+
+
+def parse_restriction_until(value: str) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    candidates = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d.%m %H:%M",
+        "%d.%m.%Y %H:%M",
+    ]
+
+    parsed_dt = None
+    now = datetime.now()
+    for fmt in candidates:
+        try:
+            parsed_dt = datetime.strptime(raw, fmt)
+            if fmt == "%d.%m %H:%M":
+                parsed_dt = parsed_dt.replace(year=now.year)
+                if parsed_dt <= now:
+                    parsed_dt = parsed_dt.replace(year=now.year + 1)
+            break
+        except ValueError:
+            continue
+
+    if not parsed_dt or parsed_dt <= now:
+        return None
+
+    return parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_table_state(conn, table_number: int):
+    return conn.execute(
+        """
+        SELECT table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
+        FROM venue_tables
+        WHERE table_number = ?
+        """,
+        (int(table_number),),
+    ).fetchone()
+
+
+def get_active_table_restrictions(conn):
+    return conn.execute(
+        """
+        SELECT table_number, label, restricted_until, restriction_comment, updated_by, updated_at
+        FROM venue_tables
+        WHERE label = 'RESTRICTED'
+          AND restricted_until IS NOT NULL
+          AND datetime(restricted_until) > datetime('now')
+        ORDER BY datetime(restricted_until) ASC, table_number ASC
+        """
+    ).fetchall()
+
+
+def get_table_booking_conflicts(conn, table_number: int, reservation_dt: str, exclude_booking_id: int = 0):
+    if not reservation_dt:
+        return []
+    return conn.execute(
+        """
+        SELECT id, name, reservation_dt, status
+        FROM bookings
+        WHERE assigned_table_number = ?
+          AND COALESCE(reservation_dt, '') = ?
+          AND id != ?
+          AND COALESCE(status, 'WAITING') NOT IN ('DECLINED', 'CANCELLED', 'NO_SHOW')
+        ORDER BY id ASC
+        """,
+        (int(table_number), reservation_dt, int(exclude_booking_id or 0)),
+    ).fetchall()
+
+
+def get_table_assignment_conflicts(conn, booking_row, table_number: int, exclude_booking_id: int = 0) -> dict:
+    conflicts = [dict(r) for r in get_table_booking_conflicts(conn, table_number, _booking_reservation_dt(booking_row), exclude_booking_id)]
+    restricted_row = conn.execute(
+        """
+        SELECT table_number, restricted_until, restriction_comment
+        FROM venue_tables
+        WHERE table_number = ?
+          AND label = 'RESTRICTED'
+          AND restricted_until IS NOT NULL
+          AND datetime(restricted_until) > datetime('now')
+        LIMIT 1
+        """,
+        (int(table_number),),
+    ).fetchone()
+    return {
+        "booking_conflicts": conflicts,
+        "restricted": dict(restricted_row) if restricted_row else None,
+    }
+
+
+def assign_table_to_booking(
+    conn,
+    booking_id: int,
+    table_number: int,
+    actor_id: str,
+    actor_name: str,
+    force_override: bool = False,
+):
+    normalized_table = normalize_table_number(table_number)
+    if not normalized_table:
+        raise ValueError("invalid_table_number")
+
+    booking_row = conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    if not booking_row:
+        raise ValueError("booking_not_found")
+
+    conflicts = get_table_assignment_conflicts(conn, booking_row, normalized_table, exclude_booking_id=booking_id)
+    if not force_override and (conflicts["booking_conflicts"] or conflicts["restricted"]):
+        raise ValueError("table_conflict")
+
+    prev_table = booking_row["assigned_table_number"]
+    conn.execute(
+        """
+        UPDATE bookings
+        SET assigned_table_number = ?, updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (normalized_table, booking_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_tables (table_number, label, updated_by, updated_at, created_at)
+        VALUES (?, 'NONE', ?, datetime('now'), datetime('now'))
+        ON CONFLICT(table_number) DO UPDATE SET
+            updated_by = excluded.updated_by,
+            updated_at = datetime('now')
+        """,
+        (normalized_table, actor_id),
+    )
+
+    payload = {
+        "old_table_number": prev_table,
+        "new_table_number": normalized_table,
+        "force_override": bool(force_override),
+        "conflicts": conflicts,
+    }
+    event_type = "TABLE_ASSIGNED" if prev_table in (None, "") else "TABLE_REASSIGNED"
+    log_booking_event(conn, booking_id, event_type, actor_id, actor_name, payload)
+    log_table_event(conn, normalized_table, event_type, actor_id, actor_name, payload, booking_id=booking_id)
+    return {"table_number": normalized_table, "conflicts": conflicts, "previous_table_number": prev_table}
+
+
+def clear_table_assignment(conn, booking_id: int, actor_id: str, actor_name: str):
+    booking_row = conn.execute("SELECT assigned_table_number FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    if not booking_row:
+        raise ValueError("booking_not_found")
+
+    prev_table = booking_row["assigned_table_number"]
+    conn.execute(
+        """
+        UPDATE bookings
+        SET assigned_table_number = NULL, updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (booking_id,),
+    )
+    payload = {"old_table_number": prev_table, "new_table_number": None}
+    log_booking_event(conn, booking_id, "TABLE_CLEARED", actor_id, actor_name, payload)
+    if prev_table:
+        log_table_event(conn, int(prev_table), "TABLE_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
+    return {"previous_table_number": prev_table}
+
+
+def set_table_label(
+    conn,
+    table_number: int,
+    label: str,
+    actor_id: str,
+    actor_name: str,
+    restricted_until: Optional[str] = None,
+    restriction_comment: str = "",
+    booking_id: Optional[int] = None,
+    force_override: bool = False,
+):
+    normalized_table = normalize_table_number(table_number)
+    if not normalized_table:
+        raise ValueError("invalid_table_number")
+
+    normalized_label = str(label or "").strip().upper()
+    if normalized_label not in TABLE_LABELS:
+        raise ValueError("invalid_table_label")
+
+    normalized_until = None
+    if normalized_label == "RESTRICTED":
+        normalized_until = parse_restriction_until(restricted_until or "")
+        if not normalized_until:
+            raise ValueError("invalid_restricted_until")
+
+        if not force_override:
+            row = conn.execute(
+                """
+                SELECT id
+                FROM bookings
+                WHERE assigned_table_number = ?
+                  AND COALESCE(status, 'WAITING') NOT IN ('DECLINED', 'CANCELLED', 'NO_SHOW')
+                  AND COALESCE(reservation_dt, '') <> ''
+                  AND datetime(replace(reservation_dt, 'T', ' ')) <= datetime(?)
+                LIMIT 1
+                """,
+                (normalized_table, normalized_until),
+            ).fetchone()
+            if row:
+                raise ValueError("table_conflict")
+
+    if normalized_label != "RESTRICTED":
+        normalized_until = None
+        restriction_comment = ""
+
+    prev_state = get_table_state(conn, normalized_table)
+    conn.execute(
+        """
+        INSERT INTO venue_tables (
+            table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(table_number) DO UPDATE SET
+            label = excluded.label,
+            restricted_until = excluded.restricted_until,
+            restriction_comment = excluded.restriction_comment,
+            updated_by = excluded.updated_by,
+            updated_at = datetime('now')
+        """,
+        (
+            normalized_table,
+            normalized_label,
+            normalized_until,
+            (restriction_comment or "").strip() or None,
+            actor_id,
+        ),
+    )
+
+    payload = {
+        "table_number": normalized_table,
+        "old_label": prev_state["label"] if prev_state else None,
+        "new_label": normalized_label,
+        "old_restricted_until": prev_state["restricted_until"] if prev_state else None,
+        "new_restricted_until": normalized_until,
+        "comment": (restriction_comment or "").strip(),
+        "force_override": bool(force_override),
+    }
+    event_type = {
+        "RESTRICTED": "TABLE_RESTRICTED",
+        "DEPOSIT": "TABLE_MARKED_DEPOSIT",
+        "NONE": "TABLE_LABEL_CLEARED",
+    }[normalized_label]
+    log_table_event(conn, normalized_table, event_type, actor_id, actor_name, payload, booking_id=booking_id)
+    if booking_id:
+        log_booking_event(conn, booking_id, event_type, actor_id, actor_name, payload)
+    return {
+        "table_number": normalized_table,
+        "label": normalized_label,
+        "restricted_until": normalized_until,
+    }
 
 
 def ensure_visit_from_confirmed_booking(conn, booking_id: int, actor_id: str, actor_name: str):
