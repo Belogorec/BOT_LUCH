@@ -770,7 +770,8 @@ def tg_webhook_impl():
             chat_id = str(chat.get("id") or "")
             from_ = m.get("from") or {}
             actor_id = str(from_.get("id") or "")
-            actor_name = (from_.get("username") or from_.get("first_name") or "").strip()
+            tg_username = str(from_.get("username") or "").strip()
+            actor_name = (tg_username or from_.get("first_name") or "").strip()
             first_name = str(from_.get("first_name") or "").strip()
 
             # ===== Обработка контакта (поделились контактом) =====
@@ -791,10 +792,18 @@ def tg_webhook_impl():
                         INSERT INTO tg_bot_users (tg_user_id, username, first_name, has_shared_phone, phone_e164, first_started_at, last_started_at, start_count)
                         VALUES (?, ?, ?, 1, ?, datetime('now'), datetime('now'), 0)
                         ON CONFLICT(tg_user_id) DO UPDATE SET
+                            username=CASE
+                                WHEN excluded.username IS NOT NULL AND trim(excluded.username) <> '' THEN excluded.username
+                                ELSE tg_bot_users.username
+                            END,
+                            first_name=CASE
+                                WHEN excluded.first_name IS NOT NULL AND trim(excluded.first_name) <> '' THEN excluded.first_name
+                                ELSE tg_bot_users.first_name
+                            END,
                             has_shared_phone=1,
                             phone_e164=excluded.phone_e164
                         """,
-                        (actor_id, actor_name, name or first_name, phone),
+                        (actor_id, tg_username, name or first_name, phone),
                     )
                     
                     tg_send_message(
@@ -1424,11 +1433,19 @@ def tg_webhook_impl():
                                                   start_count, last_start_param)
                         VALUES (?, ?, ?, datetime('now'), datetime('now'), 1, ?)
                         ON CONFLICT(tg_user_id) DO UPDATE SET
+                            username=CASE
+                                WHEN excluded.username IS NOT NULL AND trim(excluded.username) <> '' THEN excluded.username
+                                ELSE tg_bot_users.username
+                            END,
+                            first_name=CASE
+                                WHEN excluded.first_name IS NOT NULL AND trim(excluded.first_name) <> '' THEN excluded.first_name
+                                ELSE tg_bot_users.first_name
+                            END,
                             last_started_at=datetime('now'),
                             start_count=start_count+1,
                             last_start_param=excluded.last_start_param
                         """,
-                        (actor_id, actor_name, first_name, parts[1]),
+                        (actor_id, tg_username, first_name, parts[1]),
                     )
                     conn.commit()
 
@@ -1517,10 +1534,18 @@ def tg_webhook_impl():
                                               start_count)
                     VALUES (?, ?, ?, datetime('now'), datetime('now'), 1)
                     ON CONFLICT(tg_user_id) DO UPDATE SET
+                        username=CASE
+                            WHEN excluded.username IS NOT NULL AND trim(excluded.username) <> '' THEN excluded.username
+                            ELSE tg_bot_users.username
+                        END,
+                        first_name=CASE
+                            WHEN excluded.first_name IS NOT NULL AND trim(excluded.first_name) <> '' THEN excluded.first_name
+                            ELSE tg_bot_users.first_name
+                        END,
                         last_started_at=datetime('now'),
                         start_count=start_count+1
                     """,
-                    (actor_id, actor_name, first_name),
+                    (actor_id, tg_username, first_name),
                 )
                 conn.commit()
 
