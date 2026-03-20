@@ -456,6 +456,39 @@ def set_booking_deposit(
     return payload
 
 
+def clear_booking_deposit(
+    conn,
+    booking_id: int,
+    actor_id: str,
+    actor_name: str,
+):
+    booking_row = conn.execute(
+        "SELECT id, deposit_amount, deposit_comment FROM bookings WHERE id = ?",
+        (booking_id,),
+    ).fetchone()
+    if not booking_row:
+        raise ValueError("booking_not_found")
+
+    payload = {
+        "old_deposit_amount": booking_row["deposit_amount"],
+        "old_deposit_comment": booking_row["deposit_comment"],
+    }
+    conn.execute(
+        """
+        UPDATE bookings
+        SET deposit_amount = NULL,
+            deposit_comment = NULL,
+            deposit_set_at = NULL,
+            deposit_set_by = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (booking_id,),
+    )
+    log_booking_event(conn, booking_id, "DEPOSIT_CLEARED", actor_id, actor_name, payload)
+    return payload
+
+
 def set_table_label(
     conn,
     table_number: int,

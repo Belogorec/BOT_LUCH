@@ -19,6 +19,7 @@ from telegram_api import tg_edit_message
 from booking_render import render_booking_card
 from booking_service import (
     assign_table_to_booking,
+    clear_booking_deposit,
     clear_table_assignment,
     ensure_visit_from_confirmed_booking,
     log_booking_event,
@@ -271,6 +272,8 @@ def crm_sync_booking(booking_id: int):
                 actor_name,
                 comment=str(data.get("deposit_comment") or "").strip(),
             )
+        elif action == "clear_deposit":
+            clear_booking_deposit(conn, booking_id, actor_id, actor_name)
         else:
             return {"ok": False, "error": "action_not_supported"}, 400
 
