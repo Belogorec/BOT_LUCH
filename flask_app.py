@@ -10,7 +10,7 @@ from dashboard_api import (
     admin_api_segments_impl,
     admin_api_load_impl,
 )
-from db import connect, run_migrations
+from db import connect, run_migrations, seed_discount_codes_from_csv
 from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
 
@@ -78,6 +78,8 @@ def bootstrap_schema():
   conn = connect()
   try:
     run_migrations(conn)
+    seed_discount_codes_from_csv(conn)
+    conn.commit()
   finally:
     conn.close()
 
