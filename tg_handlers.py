@@ -940,6 +940,22 @@ def tg_webhook_impl():
                         # Для гостей меню с основными функциями
                         kb = build_luch_main_menu()
 
+                    # Сохраняем параметр /start в истории пользователя
+                    conn.execute(
+                        """
+                        INSERT INTO tg_bot_users (tg_user_id, username, first_name, 
+                                                  first_started_at, last_started_at, 
+                                                  start_count, last_start_param)
+                        VALUES (?, ?, ?, datetime('now'), datetime('now'), 1, ?)
+                        ON CONFLICT(tg_user_id) DO UPDATE SET
+                            last_started_at=datetime('now'),
+                            start_count=start_count+1,
+                            last_start_param=excluded.last_start_param
+                        """,
+                        (actor_id, actor_name, first_name, parts[1]),
+                    )
+                    conn.commit()
+
                     tg_send_message(chat_id, text_msg, kb)
                     return {"ok": True}
 
