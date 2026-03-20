@@ -35,6 +35,7 @@ from booking_service import (
     parse_restriction_until,
     assign_table_to_booking,
     clear_table_assignment,
+    set_booking_deposit,
     set_table_label,
     get_table_assignment_conflicts,
     get_active_table_restrictions,
@@ -701,6 +702,38 @@ def tg_webhook_impl():
                         safe_answer_callback(cq_id, "Жду часы ограничения")
                         return {"ok": True}
 
+                    if action == "show_restrictions":
+                        rows = get_active_table_restrictions(conn)
+                        if not rows:
+                            tg_send_message(chat_id, "Сейчас активных ограничений по столам нет.")
+                        else:
+                            lines = ["<b>Активные ограничения столов</b>"]
+                            for row in rows:
+                                lines.append(
+                                    f"• Стол #{row['table_number']} до <code>{_h(_display_restriction_time(row['restricted_until']))}</code>"
+                                )
+                            tg_send_message(chat_id, "\n".join(lines))
+                        safe_answer_callback(cq_id, "Список отправлен")
+                        return {"ok": True}
+
+                if parts[2] == "deposit" and len(parts) >= 4:
+                    action = parts[3].strip().lower()
+                    if action == "set":
+                        _create_pending_reply(
+                            conn,
+                            "table_flow",
+                            booking_id,
+                            chat_id,
+                            actor_id,
+                            {"mode": "set_deposit", "booking_id": booking_id},
+                            (
+                                f"<b>Установить депозит</b>\nБронь #{booking_id}\n\n"
+                                "Напишите сумму депозита целым числом."
+                            ),
+                        )
+                        safe_answer_callback(cq_id, "Жду сумму депозита")
+                        return {"ok": True}
+
                 if parts[2] == "note":
                     if not phone:
                         safe_answer_callback(cq_id, "Нет телефона у брони")
@@ -1110,6 +1143,38 @@ def tg_webhook_impl():
                             except Exception:
                                 pass
                             tg_send_message(chat_id, f"✅ Стол #{result['table_number']} назначен к брони #{booking_id}.")
+                            return {"ok": True}
+
+                        if mode == "set_deposit":
+                            try:
+                                deposit = set_booking_deposit(conn, booking_id, text, actor_id, actor_name)
+                            except ValueError:
+                                tg_send_message(chat_id, "Сумма депозита должна быть положительным целым числом.")
+                                return {"ok": True}
+
+                            conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
+                            _sync_admin_booking_card(conn, booking_id)
+                            try:
+                                send_booking_event(
+                                    conn,
+                                    booking_id,
+                                    "BOOKING_DEPOSIT_SET",
+                                    {
+                                        "actor_tg_id": actor_id,
+                                        "actor_name": actor_name,
+                                        "payload": {
+                                            "action": "set_deposit",
+                                            "deposit_amount": deposit["deposit_amount"],
+                                            "deposit_comment": deposit["deposit_comment"],
+                                        },
+                                    },
+                                )
+                            except Exception:
+                                pass
+                            tg_send_message(
+                                chat_id,
+                                f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.",
+                            )
                             return {"ok": True}
 
                         if mode in {"restrict_number", "manual_restrict_number"}:

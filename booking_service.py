@@ -193,7 +193,7 @@ def parse_restriction_until(value: str) -> Optional[str]:
         hours = 0
 
     if hours > 0:
-        base = business_now().replace(minute=0, second=0, microsecond=0)
+        base = business_now().replace(second=0, microsecond=0)
         return (base + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
 
     candidates = [
@@ -356,6 +356,49 @@ def clear_table_assignment(conn, booking_id: int, actor_id: str, actor_name: str
     if prev_table:
         log_table_event(conn, int(prev_table), "TABLE_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
     return {"previous_table_number": prev_table}
+
+
+def set_booking_deposit(
+    conn,
+    booking_id: int,
+    amount: int,
+    actor_id: str,
+    actor_name: str,
+    comment: str = "",
+):
+    try:
+        deposit_amount = int(str(amount).strip())
+    except (TypeError, ValueError):
+        raise ValueError("invalid_deposit_amount")
+
+    if deposit_amount <= 0:
+        raise ValueError("invalid_deposit_amount")
+
+    booking_row = conn.execute("SELECT id FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    if not booking_row:
+        raise ValueError("booking_not_found")
+
+    actor_display = (actor_name or actor_id or "").strip() or "telegram"
+    deposit_comment = (comment or "").strip()
+    conn.execute(
+        """
+        UPDATE bookings
+        SET deposit_amount = ?,
+            deposit_comment = ?,
+            deposit_set_at = datetime('now'),
+            deposit_set_by = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (deposit_amount, deposit_comment or None, actor_display, booking_id),
+    )
+
+    payload = {
+        "deposit_amount": deposit_amount,
+        "deposit_comment": deposit_comment,
+    }
+    log_booking_event(conn, booking_id, "DEPOSIT_SET", actor_id, actor_name, payload)
+    return payload
 
 
 def set_table_label(

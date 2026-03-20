@@ -24,6 +24,7 @@ from booking_service import (
     log_booking_event,
     mark_booking_cancelled,
     normalize_table_number,
+    set_booking_deposit,
     set_table_label,
 )
 
@@ -261,6 +262,15 @@ def crm_sync_booking(booking_id: int):
             if not table_number:
                 return {"ok": False, "error": "invalid_table_number"}, 400
             set_table_label(conn, table_number, "NONE", actor_id, actor_name, booking_id=booking_id)
+        elif action == "set_deposit":
+            set_booking_deposit(
+                conn,
+                booking_id,
+                data.get("deposit_amount"),
+                actor_id,
+                actor_name,
+                comment=str(data.get("deposit_comment") or "").strip(),
+            )
         else:
             return {"ok": False, "error": "action_not_supported"}, 400
 

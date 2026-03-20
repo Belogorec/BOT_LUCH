@@ -97,6 +97,10 @@ def init_schema(conn: sqlite3.Connection):
           guest_segment       TEXT,
           reservation_token   TEXT,
           assigned_table_number INTEGER,
+          deposit_amount      INTEGER,
+          deposit_comment     TEXT,
+          deposit_set_at      TEXT,
+          deposit_set_by      TEXT,
           telegram_chat_id    TEXT,
           telegram_message_id TEXT,
           raw_payload_json    TEXT,
@@ -246,6 +250,10 @@ def init_schema(conn: sqlite3.Connection):
     _ensure_column(conn, "bookings", "user_chat_id", "TEXT")
     _ensure_column(conn, "bookings", "reservation_token", "TEXT")
     _ensure_column(conn, "bookings", "assigned_table_number", "INTEGER")
+    _ensure_column(conn, "bookings", "deposit_amount", "INTEGER")
+    _ensure_column(conn, "bookings", "deposit_comment", "TEXT")
+    _ensure_column(conn, "bookings", "deposit_set_at", "TEXT")
+    _ensure_column(conn, "bookings", "deposit_set_by", "TEXT")
     _ensure_column(conn, "tg_bot_users", "has_shared_phone", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "tg_bot_users", "phone_e164", "TEXT")
     conn.execute(
