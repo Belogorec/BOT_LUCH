@@ -285,6 +285,24 @@ def get_table_assignment_conflicts(conn, booking_row, table_number: int, exclude
     }
 
 
+def _get_active_restriction_state(conn, table_number: int) -> Optional[dict]:
+    if not normalize_table_number(table_number):
+        return None
+    row = conn.execute(
+        """
+        SELECT table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
+        FROM venue_tables
+        WHERE table_number = ?
+          AND label = 'RESTRICTED'
+          AND restricted_until IS NOT NULL
+          AND datetime(restricted_until) > datetime('now', '{BUSINESS_NOW_SQL}')
+        LIMIT 1
+        """.format(BUSINESS_NOW_SQL=BUSINESS_NOW_SQL),
+        (int(table_number),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def assign_table_to_booking(
     conn,
     booking_id: int,
@@ -306,6 +324,7 @@ def assign_table_to_booking(
         raise ValueError("table_conflict")
 
     prev_table = booking_row["assigned_table_number"]
+    moved_restriction = _get_active_restriction_state(conn, prev_table) if prev_table and int(prev_table) != normalized_table else None
     conn.execute(
         """
         UPDATE bookings
@@ -324,16 +343,52 @@ def assign_table_to_booking(
         """,
         (normalized_table, actor_id),
     )
+    if moved_restriction:
+        conn.execute(
+            """
+            UPDATE venue_tables
+            SET label = 'NONE',
+                restricted_until = NULL,
+                restriction_comment = NULL,
+                updated_by = ?,
+                updated_at = datetime('now')
+            WHERE table_number = ?
+            """,
+            (actor_id, int(prev_table)),
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_tables (
+                table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
+            ) VALUES (?, 'RESTRICTED', ?, ?, ?, datetime('now'), datetime('now'))
+            ON CONFLICT(table_number) DO UPDATE SET
+                label = 'RESTRICTED',
+                restricted_until = excluded.restricted_until,
+                restriction_comment = excluded.restriction_comment,
+                updated_by = excluded.updated_by,
+                updated_at = datetime('now')
+            """,
+            (
+                normalized_table,
+                moved_restriction.get("restricted_until"),
+                moved_restriction.get("restriction_comment"),
+                actor_id,
+            ),
+        )
 
     payload = {
         "old_table_number": prev_table,
         "new_table_number": normalized_table,
         "force_override": bool(force_override),
         "conflicts": conflicts,
+        "moved_restriction": moved_restriction,
     }
     event_type = "TABLE_ASSIGNED" if prev_table in (None, "") else "TABLE_REASSIGNED"
     log_booking_event(conn, booking_id, event_type, actor_id, actor_name, payload)
     log_table_event(conn, normalized_table, event_type, actor_id, actor_name, payload, booking_id=booking_id)
+    if moved_restriction and prev_table:
+        log_table_event(conn, int(prev_table), "TABLE_LABEL_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
+        log_table_event(conn, normalized_table, "TABLE_RESTRICTED", actor_id, actor_name, payload, booking_id=booking_id)
     return {"table_number": normalized_table, "conflicts": conflicts, "previous_table_number": prev_table}
 
 
