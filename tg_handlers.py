@@ -1018,7 +1018,17 @@ def tg_webhook_impl():
 
             if cmd == "/stat":
                 if actor_id not in PROMO_ADMIN_IDS:
-                    tg_send_message(chat_id, "Нет доступа.")
+                    error_msg = (
+                        "❌ Доступ запрещён\n\n"
+                        "Ваш ID: <code>{}</code>\n\n"
+                    ).format(_h(actor_id))
+                    
+                    if PROMO_ADMIN_IDS:
+                        error_msg += f"Админы: {', '.join(PROMO_ADMIN_IDS[:5])}"
+                    else:
+                        error_msg += "⚠️ PROMO_ADMIN_IDS не установлены на сервере!"
+                    
+                    tg_send_message(chat_id, error_msg)
                     return {"ok": True}
 
                 total_users_row = conn.execute(
