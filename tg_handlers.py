@@ -116,6 +116,10 @@ def _is_backoffice_context(chat_id: str, actor_id: str) -> bool:
     return (str(chat_id or "").strip() == str(TG_CHAT_ID or "").strip()) or (actor_id in PROMO_ADMIN_IDS)
 
 
+def _is_waiter_chat(chat_id: str) -> bool:
+    return bool(WAITER_CHAT_ID) and str(chat_id or "").strip() == str(WAITER_CHAT_ID).strip()
+
+
 def _sync_admin_booking_card(conn, booking_id: int) -> None:
     try:
         booking_row = conn.execute(
@@ -346,6 +350,9 @@ def tg_webhook_impl():
 
             # Acknowledge quickly so Telegram doesn't keep spinner on cold starts.
             safe_answer_callback(cq_id)
+
+            if _is_waiter_chat(chat_id):
+                return {"ok": True}
 
             if data == "about_luch":
                 tg_send_message(chat_id, get_luch_info_text("about_luch"), reply_markup=build_luch_main_menu())
@@ -782,6 +789,9 @@ def tg_webhook_impl():
             tg_username = str(from_.get("username") or "").strip()
             actor_name = (tg_username or from_.get("first_name") or "").strip()
             first_name = str(from_.get("first_name") or "").strip()
+
+            if _is_waiter_chat(chat_id):
+                return {"ok": True}
 
             # ===== Обработка контакта (поделились контактом) =====
             contact = m.get("contact")
