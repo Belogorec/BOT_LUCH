@@ -12,6 +12,7 @@ from config import (
     TG_WEBHOOK_SECRET,
     PROMO_ADMIN_IDS,
     TG_CHAT_ID,
+    WAITER_CHAT_ID,
     BOT_TOKEN,
     CRM_AUTH_CONFIRM_URL,
     CRM_AUTH_TIMEOUT_SEC,
@@ -46,6 +47,7 @@ from booking_render import (
 )
 from crm_sync import send_booking_event, send_table_event
 from db import connect
+from waiter_notify import notify_waiters_about_deposit_booking
 
 MINIAPP_URL = os.environ.get(
     "MINIAPP_URL",
@@ -594,21 +596,28 @@ def tg_webhook_impl():
                         try:
                             result = assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name, force_override=True)
                             _sync_admin_booking_card(conn, booking_id)
-                            send_booking_event(
-                                conn,
-                                booking_id,
-                                "BOOKING_TABLE_UPDATED",
-                                {
-                                    "actor_tg_id": actor_id,
-                                    "actor_name": actor_name,
-                                    "payload": {
-                                        "action": "assign_table",
+                            try:
+                                send_booking_event(
+                                    conn,
+                                    booking_id,
+                                    "BOOKING_TABLE_UPDATED",
+                                    {
+                                        "actor_tg_id": actor_id,
+                                        "actor_name": actor_name,
+                                        "payload": {
+                                            "action": "assign_table",
+                                            "table_number": result["table_number"],
+                                            "force_override": True,
+                                        },
                                         "table_number": result["table_number"],
-                                        "force_override": True,
                                     },
-                                    "table_number": result["table_number"],
-                                },
-                            )
+                                )
+                            except Exception:
+                                traceback.print_exc()
+                            try:
+                                notify_waiters_about_deposit_booking(conn, booking_id)
+                            except Exception:
+                                traceback.print_exc()
                             safe_answer_callback(cq_id, f"Стол #{table_number} назначен")
                         except Exception:
                             traceback.print_exc()
@@ -1151,6 +1160,10 @@ def tg_webhook_impl():
                                 )
                             except Exception:
                                 pass
+                            try:
+                                notify_waiters_about_deposit_booking(conn, booking_id)
+                            except Exception:
+                                traceback.print_exc()
                             tg_send_message(chat_id, f"✅ Стол #{result['table_number']} назначен к брони #{booking_id}.")
                             return {"ok": True}
 
@@ -1180,6 +1193,10 @@ def tg_webhook_impl():
                                 )
                             except Exception:
                                 pass
+                            try:
+                                notify_waiters_about_deposit_booking(conn, booking_id)
+                            except Exception:
+                                traceback.print_exc()
                             tg_send_message(
                                 chat_id,
                                 f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.",
@@ -1587,6 +1604,26 @@ def tg_webhook_impl():
                         f"admin доступ QR: <b>{'ДА' if is_admin else 'НЕТ'}</b>",
                     ])
                 )
+                return {"ok": True}
+
+            if cmd == "/chatid":
+                chat_type = str(chat.get("type") or "").strip() or "unknown"
+                chat_title = str(chat.get("title") or chat.get("username") or "").strip()
+                lines = [
+                    "<b>Текущий чат</b>",
+                    f"chat_id: <code>{_h(chat_id)}</code>",
+                    f"type: <code>{_h(chat_type)}</code>",
+                ]
+                if chat_title:
+                    lines.append(f"title: <code>{_h(chat_title)}</code>")
+
+                configured_waiter_chat = str(WAITER_CHAT_ID or "").strip()
+                if configured_waiter_chat and actor_id in PROMO_ADMIN_IDS:
+                    lines.append(
+                        f"совпадает с WAITER_CHAT_ID: <b>{'ДА' if configured_waiter_chat == chat_id else 'НЕТ'}</b>"
+                    )
+
+                tg_send_message(chat_id, "\n".join(lines))
                 return {"ok": True}
 
             if cmd == "/stat":

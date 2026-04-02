@@ -41,6 +41,7 @@ def _parse_admin_ids(raw: str) -> list[str]:
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
+WAITER_CHAT_ID = os.getenv("WAITER_CHAT_ID", os.getenv("WAITERS_CHAT_ID", "")).strip()
 TILDA_SECRET = os.getenv("TILDA_SECRET", "").strip()
 TG_WEBHOOK_SECRET = os.getenv("TG_WEBHOOK_SECRET", "").strip()
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "").strip()

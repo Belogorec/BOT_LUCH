@@ -28,6 +28,7 @@ from booking_service import (
     set_booking_deposit,
     set_table_label,
 )
+from waiter_notify import notify_waiters_about_deposit_booking
 
 app = Flask(__name__)
 
@@ -186,6 +187,7 @@ def crm_sync_booking(booking_id: int):
     actor_name = str(payload.get("actor_name") or "crm")
 
     conn = connect()
+    should_notify_waiters = False
     try:
         exists = conn.execute("SELECT id FROM bookings WHERE id=?", (booking_id,)).fetchone()
         if not exists:
@@ -237,6 +239,7 @@ def crm_sync_booking(booking_id: int):
                 actor_name,
                 force_override=str(data.get("force_override") or "").strip() == "1",
             )
+            should_notify_waiters = True
         elif action == "clear_table":
             clear_table_assignment(conn, booking_id, actor_id, actor_name)
         elif action == "restrict_table":
@@ -272,6 +275,7 @@ def crm_sync_booking(booking_id: int):
                 actor_name,
                 comment=str(data.get("deposit_comment") or "").strip(),
             )
+            should_notify_waiters = True
         elif action == "clear_deposit":
             clear_booking_deposit(conn, booking_id, actor_id, actor_name)
         else:
@@ -282,6 +286,11 @@ def crm_sync_booking(booking_id: int):
             _refresh_admin_booking_card(conn, booking_id)
         except Exception:
             pass
+        if should_notify_waiters:
+            try:
+                notify_waiters_about_deposit_booking(conn, booking_id)
+            except Exception:
+                pass
         return {"ok": True, "booking_id": booking_id}, 200
     except ValueError as exc:
         conn.rollback()
