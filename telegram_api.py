@@ -55,6 +55,15 @@ def tg_post(method: str, data: dict):
         error_code = payload.get("error_code")
         params = payload.get("parameters") or {}
 
+        # Telegram returns 400 when the edited text/markup is identical.
+        # This should not break the surrounding business flow.
+        if (
+            method == "editMessageText"
+            and error_code == 400
+            and "message is not modified" in str(description).lower()
+        ):
+            return payload
+
         if error_code == 429 and attempt < max_attempts:
             retry_after = int(params.get("retry_after") or 0)
             wait_sec = max(0.8 * attempt, float(retry_after))

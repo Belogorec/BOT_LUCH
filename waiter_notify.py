@@ -9,7 +9,7 @@ def _h(value: object) -> str:
     return html.escape(str(value or ""), quote=False)
 
 
-def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
+def _load_waiter_booking_row(conn, booking_id: int):
     row = conn.execute(
         """
         SELECT
@@ -29,6 +29,11 @@ def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
         """,
         (int(booking_id),),
     ).fetchone()
+    return row
+
+
+def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
+    row = _load_waiter_booking_row(conn, booking_id)
     if not row:
         return None
 
@@ -71,11 +76,50 @@ def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
 def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
     target_chat_id = str(WAITER_CHAT_ID or "").strip()
     if not target_chat_id:
+        print(
+            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=missing_waiter_chat_id",
+            flush=True,
+        )
+        return False
+
+    row = _load_waiter_booking_row(conn, booking_id)
+    if not row:
+        print(
+            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=booking_not_found",
+            flush=True,
+        )
+        return False
+
+    table_number = row["assigned_table_number"]
+    deposit_amount = row["deposit_amount"]
+    if not table_number:
+        print(
+            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=missing_table deposit={deposit_amount!r}",
+            flush=True,
+        )
+        return False
+    if not deposit_amount:
+        print(
+            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=missing_deposit table={table_number!r}",
+            flush=True,
+        )
         return False
 
     text = build_waiter_booking_message(conn, booking_id)
     if not text:
+        print(
+            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=empty_message table={table_number!r} deposit={deposit_amount!r}",
+            flush=True,
+        )
         return False
 
-    tg_send_message(target_chat_id, text)
+    print(
+        f"[WAITER-NOTIFY] send booking_id={int(booking_id)} chat_id={target_chat_id} table={table_number!r} deposit={deposit_amount!r}",
+        flush=True,
+    )
+    message_id = tg_send_message(target_chat_id, text)
+    print(
+        f"[WAITER-NOTIFY] sent booking_id={int(booking_id)} chat_id={target_chat_id} message_id={message_id}",
+        flush=True,
+    )
     return True
