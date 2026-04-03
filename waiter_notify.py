@@ -2,6 +2,7 @@ import html
 from typing import Optional
 
 from config import WAITER_CHAT_ID
+from local_log import log_event
 from telegram_api import tg_send_message
 
 
@@ -76,50 +77,61 @@ def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
 def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
     target_chat_id = str(WAITER_CHAT_ID or "").strip()
     if not target_chat_id:
-        print(
-            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=missing_waiter_chat_id",
-            flush=True,
-        )
+        log_event("WAITER-NOTIFY", status="skip", booking_id=int(booking_id), reason="missing_waiter_chat_id")
         return False
 
     row = _load_waiter_booking_row(conn, booking_id)
     if not row:
-        print(
-            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=booking_not_found",
-            flush=True,
-        )
+        log_event("WAITER-NOTIFY", status="skip", booking_id=int(booking_id), reason="booking_not_found")
         return False
 
     table_number = row["assigned_table_number"]
     deposit_amount = row["deposit_amount"]
     if not table_number:
-        print(
-            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=missing_table deposit={deposit_amount!r}",
-            flush=True,
+        log_event(
+            "WAITER-NOTIFY",
+            status="skip",
+            booking_id=int(booking_id),
+            reason="missing_table",
+            deposit=deposit_amount,
         )
         return False
     if not deposit_amount:
-        print(
-            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=missing_deposit table={table_number!r}",
-            flush=True,
+        log_event(
+            "WAITER-NOTIFY",
+            status="skip",
+            booking_id=int(booking_id),
+            reason="missing_deposit",
+            table=table_number,
         )
         return False
 
     text = build_waiter_booking_message(conn, booking_id)
     if not text:
-        print(
-            f"[WAITER-NOTIFY] skip booking_id={int(booking_id)} reason=empty_message table={table_number!r} deposit={deposit_amount!r}",
-            flush=True,
+        log_event(
+            "WAITER-NOTIFY",
+            status="skip",
+            booking_id=int(booking_id),
+            reason="empty_message",
+            table=table_number,
+            deposit=deposit_amount,
         )
         return False
 
-    print(
-        f"[WAITER-NOTIFY] send booking_id={int(booking_id)} chat_id={target_chat_id} table={table_number!r} deposit={deposit_amount!r}",
-        flush=True,
+    log_event(
+        "WAITER-NOTIFY",
+        status="send",
+        booking_id=int(booking_id),
+        chat_id=target_chat_id,
+        table=table_number,
+        deposit=deposit_amount,
     )
     message_id = tg_send_message(target_chat_id, text)
-    print(
-        f"[WAITER-NOTIFY] sent booking_id={int(booking_id)} chat_id={target_chat_id} message_id={message_id}",
-        flush=True,
+    log_event(
+        "WAITER-NOTIFY",
+        status="sent",
+        booking_id=int(booking_id),
+        chat_id=target_chat_id,
+        message_id=message_id,
     )
     return True
