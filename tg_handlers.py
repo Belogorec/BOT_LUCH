@@ -1211,16 +1211,22 @@ def tg_webhook_impl():
                                 "SELECT assigned_table_number FROM bookings WHERE id = ?",
                                 (booking_id,),
                             ).fetchone()
-                            reminder = ""
                             if booking_state and not booking_state["assigned_table_number"]:
-                                reminder = (
-                                    "\n\n"
-                                    "Назначьте стол для этой брони, чтобы информация ушла в группу официантов."
+                                _create_pending_reply(
+                                    conn,
+                                    "table_flow",
+                                    booking_id,
+                                    chat_id,
+                                    actor_id,
+                                    {"mode": "assign_table", "booking_id": booking_id},
+                                    (
+                                        f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.\n\n"
+                                        "Чтобы информация ушла в группу официантов, у брони должны быть и депозит, и стол.\n"
+                                        "Ответьте на это сообщение номером стола."
+                                    ),
                                 )
-                            tg_send_message(
-                                chat_id,
-                                f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.{reminder}",
-                            )
+                                return {"ok": True}
+                            tg_send_message(chat_id, f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.")
                             return {"ok": True}
 
                         if mode in {"restrict_number", "manual_restrict_number"}:
