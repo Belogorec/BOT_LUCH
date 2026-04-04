@@ -53,23 +53,9 @@ def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
 
     lines = [
         "<b>Стол с депозитом</b>",
-        f"<b>Бронь:</b> #{int(row['id'])}",
         f"<b>Стол:</b> #{int(table_number)}",
         f"<b>Депозит:</b> {_h(int(deposit_amount))} руб.",
     ]
-
-    if dt_value:
-        lines.append(f"<b>Дата/время:</b> {_h(dt_value)}")
-    if row["guests_count"] is not None:
-        lines.append(f"<b>Гостей:</b> {_h(int(row['guests_count']))}")
-    if guest_name:
-        lines.append(f"<b>Имя:</b> {_h(guest_name)}")
-    if guest_phone:
-        lines.append(f"<b>Телефон:</b> {_h(guest_phone)}")
-    if deposit_comment:
-        lines.append(f"<b>Комментарий к депозиту:</b> {_h(deposit_comment)}")
-    if booking_comment:
-        lines.append(f"<b>Комментарий к брони:</b> {_h(booking_comment)}")
 
     return "\n".join(lines)
 
