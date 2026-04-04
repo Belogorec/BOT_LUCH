@@ -1207,9 +1207,19 @@ def tg_webhook_impl():
                                 notify_waiters_about_deposit_booking(conn, booking_id)
                             except Exception:
                                 traceback.print_exc()
+                            booking_state = conn.execute(
+                                "SELECT assigned_table_number FROM bookings WHERE id = ?",
+                                (booking_id,),
+                            ).fetchone()
+                            reminder = ""
+                            if booking_state and not booking_state["assigned_table_number"]:
+                                reminder = (
+                                    "\n\n"
+                                    "Назначьте стол для этой брони, чтобы информация ушла в группу официантов."
+                                )
                             tg_send_message(
                                 chat_id,
-                                f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.",
+                                f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.{reminder}",
                             )
                             return {"ok": True}
 
