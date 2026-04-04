@@ -27,6 +27,8 @@ data/
 # Local artifacts
 config.py.html
 tg_handlers_backup.py
+CRM-example/
 CRM-example/guestsluch.csv
+process_tg_outbox.py
 
 guestsluch_temp.csv

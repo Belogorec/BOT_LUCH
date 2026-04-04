@@ -1,24 +1,114 @@
-# LUCHBAR Bot
+# LUCH Bot
 
-Telegram-бот и публичный API бронирований бара "Луч".
+Основной Telegram-бот и публичный API бронирований бара `Луч`.
 
-## Локальные логи
+## Что входит в этот репозиторий
+
+- Telegram webhook и admin-flow: `tg_handlers.py`
+- HTTP API и Flask entrypoint: `flask_app.py`
+- Бизнес-логика броней: `booking_service.py`
+- Интеграция с CRM: `crm_sync.py`
+- Уведомления официантам: `waiter_notify.py`
+- Telegram API helper: `telegram_api.py`
+
+Связанные сервисы:
+- CRM: отдельный репозиторий `LUCH_crm`
+- Relay: отдельный репозиторий `luchbarbot-relay`
+
+## Topology
+
+```text
+Telegram / Mini App / Tilda
+          |
+          v
+      LUCH Bot
+      /data/luchbar.db
+          |
+          +--> LUCH CRM sync
+          |
+          +--> Waiter Telegram group notifications
+```
+
+Если используется relay, тогда Telegram webhook и Tilda webhook сначала приходят в `luchbarbot-relay`, а уже потом в этот сервис.
+
+## Основные сценарии
+
+- создание брони из Telegram;
+- создание брони из mini app;
+- приём брони из Tilda;
+- админские действия по броням и столам;
+- синхронизация событий в CRM;
+- уведомления в группу официантов по броням со `столом + депозитом`.
+
+## ENV
+
+Критичные переменные:
+- `BOT_TOKEN`
+- `TG_CHAT_ID`
+- `WAITER_CHAT_ID`
+- `CRM_API_URL`
+- `CRM_API_KEY`
+- `DB_PATH` или путь к `/data/luchbar.db`
+- `TG_WEBHOOK_SECRET`
+- `TILDA_SECRET`
+
+## Локальный запуск
+
+```bash
+cd luchbarbot
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python init_db.py
+python flask_app.py
+```
+
+Проверка:
+
+```bash
+curl -s http://localhost:5000/health
+```
+
+## Логи
 
 Проект использует два уровня диагностики:
-- локальные runtime-логи в stdout/stderr;
-- бизнес-историю в SQLite (`booking_events`, `table_events`, `guest_events`).
+- runtime-логи в stdout/stderr Railway;
+- бизнес-историю в SQLite: `booking_events`, `table_events`, `guest_events`.
 
-Правила для локальных логов:
-- использовать короткий стабильный префикс в квадратных скобках;
-- писать одну основную строку в формате `key=value`;
-- выводить сообщения через `local_log.log_event(...)`;
-- для исключений использовать `local_log.log_exception(...)`, чтобы рядом был traceback;
-- не логировать лишние персональные данные, если для диагностики хватает `booking_id`, `table`, `action`, `chat_id`.
+Правила локальных логов:
+- писать через `local_log.py`;
+- использовать формат `[PREFIX] key=value key=value`;
+- не тащить в строку лишние персональные данные, если хватает `booking_id`, `table`, `action`, `chat_id`;
+- для исключений использовать `log_exception(...)`.
 
-Текущие префиксы:
-- `[TG-WEBHOOK]` - входящие Telegram update и ошибки webhook.
-- `[MINIAPP]` - создание брони из mini app.
-- `[CRM_SYNC]` - синхронизация событий бота в CRM.
-- `[WAITER-NOTIFY]` - отправка уведомлений в группу официантов.
+Основные префиксы:
+- `[TG-WEBHOOK]` — входящие Telegram update, дубли, ошибки callback/webhook.
+- `[MINIAPP]` — создание брони из mini app.
+- `[CRM_SYNC]` — отправка и приём sync-событий между ботом и CRM.
+- `[WAITER-NOTIFY]` — уведомления в группу официантов.
 
-Логи удобно фильтровать по префиксу. Например: `WAITER-NOTIFY`, `CRM_SYNC`, `TG-WEBHOOK`.
+Что искать в Railway Logs:
+- `WAITER-NOTIFY` — почему уведомление ушло или было пропущено.
+- `TG-WEBHOOK` — пришёл ли `callback_query`, не был ли update дублем.
+- `CRM_SYNC` — ушло ли событие в CRM.
+
+## Официанты
+
+Логика уведомлений:
+- если есть `deposit_amount`, но нет `assigned_table_number` — уведомление официантам не отправляется;
+- админ получает напоминание назначить стол;
+- когда у брони есть и `стол`, и `депозит`, бот отправляет карточку в waiter chat.
+
+Waiter chat изолирован:
+- входящие команды и callback-логика там игнорируются;
+- чат используется только как канал служебных уведомлений.
+
+## Deploy notes
+
+- Railway service: `BOT_LUCH`
+- DB volume: обычно `/data/luchbar.db`
+- если включён relay, webhook Telegram должен смотреть на relay, а не на этот сервис напрямую
+
+## История изменений
+
+Краткая история последних рабочих правок вынесена в `CHANGELOG.md`.
