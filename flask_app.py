@@ -11,7 +11,7 @@ from dashboard_api import (
     admin_api_segments_impl,
     admin_api_load_impl,
 )
-from config import BOT_TOKEN
+from config import BOT_TOKEN, VK_CALLBACK_SECRET, VK_CONFIRMATION_TOKEN, VK_GROUP_ID
 from db import connect, run_migrations, seed_discount_codes_from_csv
 from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
@@ -94,6 +94,19 @@ def _crm_sync_authorized(req) -> bool:
     payload = req.get_json(silent=True) or {}
     incoming = str(req.headers.get("X-Bot-Token") or payload.get("bot_token") or "").strip()
     return bool(BOT_TOKEN) and incoming == BOT_TOKEN
+
+
+def _vk_callback_authorized(payload: dict) -> bool:
+    expected_group_id = str(VK_GROUP_ID or "").strip()
+    expected_secret = str(VK_CALLBACK_SECRET or "").strip()
+    incoming_group_id = str(payload.get("group_id") or "").strip()
+    incoming_secret = str(payload.get("secret") or "").strip()
+
+    if expected_group_id and incoming_group_id and incoming_group_id != expected_group_id:
+        return False
+    if expected_secret and incoming_secret != expected_secret:
+        return False
+    return True
 
 
 def _refresh_admin_booking_card(conn, booking_id: int) -> None:
@@ -1121,6 +1134,26 @@ def tilda_webhook():
 @app.post("/tg/webhook")
 def tg_webhook():
     return tg_webhook_impl()
+
+
+@app.post("/vk/callback")
+def vk_callback():
+    payload = request.get_json(silent=True) or {}
+    event_type = str(payload.get("type") or "").strip()
+    incoming_group_id = str(payload.get("group_id") or "").strip()
+
+    if event_type == "confirmation":
+        if VK_GROUP_ID and incoming_group_id and incoming_group_id != str(VK_GROUP_ID):
+            return ("forbidden", 403)
+        if not VK_CONFIRMATION_TOKEN:
+            return ("VK_CONFIRMATION_TOKEN missing", 500)
+        return VK_CONFIRMATION_TOKEN
+
+    if not _vk_callback_authorized(payload):
+        return ("forbidden", 403)
+
+    # Minimal first step: accept VK callbacks and respond with plain text "ok".
+    return "ok"
 
 
 if __name__ == "__main__":

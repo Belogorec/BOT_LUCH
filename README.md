@@ -51,6 +51,11 @@ Telegram / Mini App / Tilda
 - `DB_PATH` или путь к `/data/luchbar.db`
 - `TG_WEBHOOK_SECRET`
 - `TILDA_SECRET`
+- `VK_GROUP_ID`
+- `VK_ACCESS_TOKEN`
+- `VK_CALLBACK_SECRET`
+- `VK_CONFIRMATION_TOKEN`
+- `VK_API_VERSION`
 
 ## Локальный запуск
 
@@ -108,6 +113,7 @@ Waiter chat изолирован:
 - Railway service: `BOT_LUCH`
 - DB volume: обычно `/data/luchbar.db`
 - если включён relay, webhook Telegram должен смотреть на relay, а не на этот сервис напрямую
+- VK Callback URL: `https://botluch-production.up.railway.app/vk/callback`
 
 ## История изменений
 

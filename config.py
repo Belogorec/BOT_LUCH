@@ -55,6 +55,11 @@ CRM_AUTH_CONFIRM_URL = os.getenv(
     "https://luchcrm-production.up.railway.app/api/auth/confirm-code",
 ).strip()
 CRM_AUTH_TIMEOUT_SEC = int(os.getenv("CRM_AUTH_TIMEOUT_SEC", "8").strip() or "8")
+VK_GROUP_ID = os.getenv("VK_GROUP_ID", "").strip()
+VK_ACCESS_TOKEN = os.getenv("VK_ACCESS_TOKEN", "").strip()
+VK_CALLBACK_SECRET = os.getenv("VK_CALLBACK_SECRET", "").strip()
+VK_CONFIRMATION_TOKEN = os.getenv("VK_CONFIRMATION_TOKEN", "").strip()
+VK_API_VERSION = os.getenv("VK_API_VERSION", "5.199").strip() or "5.199"
 
 # Supports: "12345,67890", "12345 67890", JSON list, or single PROMO_ADMIN_ID.
 _admins_multi = _parse_admin_ids(os.getenv("PROMO_ADMIN_IDS", ""))
