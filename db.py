@@ -243,6 +243,20 @@ def init_schema(conn: sqlite3.Connection):
 
         CREATE INDEX IF NOT EXISTS idx_processed_tg_updates_created_at
           ON processed_tg_updates(created_at);
+
+        -- ===== vk_staff_peers =====
+        CREATE TABLE IF NOT EXISTS vk_staff_peers (
+          peer_id           TEXT PRIMARY KEY,
+          from_id           TEXT,
+          is_active         INTEGER NOT NULL DEFAULT 1,
+          role_hint         TEXT,
+          last_message_text TEXT,
+          last_seen_at      TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_vk_staff_peers_active ON vk_staff_peers(is_active, updated_at);
         """
     )
 

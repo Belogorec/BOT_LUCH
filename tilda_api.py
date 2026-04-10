@@ -13,6 +13,7 @@ from booking_service import (
 from booking_render import render_booking_card
 from crm_sync import send_booking_event
 from db import connect, get_tags
+from vk_staff_notify import notify_vk_staff_about_new_booking
 
 
 def ensure_db():
@@ -328,6 +329,29 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
             )
             conn.commit()
             tg_status = "error"
+
+        try:
+            sent_count = notify_vk_staff_about_new_booking(conn, booking_id, source="tilda")
+            if sent_count:
+                log_booking_event(
+                    conn,
+                    booking_id,
+                    "VK_STAFF_SYNC_OK",
+                    "system",
+                    "system",
+                    {"source": "tilda", "sent_count": sent_count},
+                )
+                conn.commit()
+        except Exception as e:
+            log_booking_event(
+                conn,
+                booking_id,
+                "VK_STAFF_SYNC_FAIL",
+                "system",
+                "system",
+                {"source": "tilda", "error": str(e)},
+            )
+            conn.commit()
 
         return {"ok": True, "booking_id": booking_id, "tg_status": tg_status}
 

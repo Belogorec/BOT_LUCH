@@ -18,6 +18,7 @@ from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
 from telegram_api import tg_edit_message
 from vk_api import vk_api_enabled, vk_send_message
+from vk_staff_notify import notify_vk_staff_about_new_booking, upsert_vk_staff_peer
 from booking_render import render_booking_card
 from booking_service import (
     assign_table_to_booking,
@@ -1000,6 +1001,7 @@ def api_submit_booking():
   from telegram_api import tg_send_message as _tg_send
   from config import TG_CHAT_ID
   from crm_sync import send_booking_event
+  from vk_staff_notify import notify_vk_staff_about_new_booking
 
   conn = ensure_db()
   try:
@@ -1075,6 +1077,13 @@ def api_submit_booking():
           log_booking_event(conn, booking_id, "TG_SYNC_OK", "system", "system", {"target_chat_id": str(TG_CHAT_ID)})
       except Exception as e:
         log_booking_event(conn, booking_id, "TG_SYNC_FAIL", "system", "system", {"error": str(e)})
+
+    try:
+      sent_count = notify_vk_staff_about_new_booking(conn, booking_id, source="telegram_miniapp_api")
+      if sent_count:
+        log_booking_event(conn, booking_id, "VK_STAFF_SYNC_OK", "system", "system", {"sent_count": sent_count})
+    except Exception as e:
+      log_booking_event(conn, booking_id, "VK_STAFF_SYNC_FAIL", "system", "system", {"error": str(e)})
 
     try:
       sync_ok = send_booking_event(
@@ -1166,6 +1175,12 @@ def vk_callback():
         peer_id = message.get("peer_id")
         from_id = message.get("from_id")
         text = str(message.get("text") or "").strip()
+        conn = connect()
+        try:
+            is_new_peer = upsert_vk_staff_peer(conn, peer_id=peer_id, from_id=from_id, message_text=text)
+            conn.commit()
+        finally:
+            conn.close()
         log_event(
             "VK-CALLBACK",
             status="message_new",
@@ -1173,15 +1188,19 @@ def vk_callback():
             from_id=from_id or "-",
             text=(text[:120] if text else "-"),
         )
-        if peer_id and vk_api_enabled():
+        normalized_text = text.lower()
+        should_reply = bool(is_new_peer or normalized_text in {"start", "/start", "старт", "help", "/help", "меню", "menu"})
+        if peer_id and vk_api_enabled() and should_reply:
             try:
                 vk_send_message(
                     int(peer_id),
-                    "Привет! Бот Луч во ВКонтакте уже подключен. Это тестовый ответ. Следующим этапом добавим бронь и рабочий диалог.",
+                    "Рабочий чат LUCH подключен.\nСюда будут приходить новые брони из действующих webhook-источников.\nСледующим этапом добавим управление бронями прямо из VK.",
                 )
                 log_event("VK-CALLBACK", status="message_replied", peer_id=peer_id)
             except Exception as exc:
                 log_exception("VK-CALLBACK", status="message_reply_failed", peer_id=peer_id, error=exc)
+        elif peer_id and not should_reply:
+            log_event("VK-CALLBACK", status="message_recorded", peer_id=peer_id)
         elif peer_id:
             log_event("VK-CALLBACK", status="message_reply_skipped", reason="vk_api_disabled", peer_id=peer_id)
 
