@@ -16,7 +16,7 @@ from booking_service import (
     set_table_label,
 )
 from crm_sync import send_booking_event, send_table_event
-from vk_api import vk_api_enabled, vk_send_message
+from vk_api import vk_send_message
 from waiter_notify import notify_waiters_about_deposit_booking
 
 
@@ -178,12 +178,6 @@ def _clear_vk_pending_action(conn, row_id: int) -> None:
     conn.execute("DELETE FROM pending_replies WHERE id=?", (int(row_id),))
 
 
-def _refresh_peer_booking_card(conn, peer_id: int, booking_id: int) -> None:
-    if not vk_api_enabled():
-        return
-    send_vk_booking_card(conn, peer_id, booking_id)
-
-
 def _booking_action_message(prefix: str, body: str) -> str:
     return f"{prefix}\n{body}".strip()
 
@@ -210,7 +204,6 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
             send_booking_event(conn, booking_id, "BOOKING_CONFIRMED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"source": "vk_staff"}})
         except Exception:
             pass
-        _refresh_peer_booking_card(conn, peer, booking_id)
         vk_send_message(peer, _booking_action_message("Бронь подтверждена.", f"ID: #{booking_id}"))
         return True
 
@@ -220,7 +213,6 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
             send_booking_event(conn, booking_id, "BOOKING_CANCELLED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"source": "vk_staff"}})
         except Exception:
             pass
-        _refresh_peer_booking_card(conn, peer, booking_id)
         vk_send_message(peer, _booking_action_message("Бронь отменена.", f"ID: #{booking_id}"))
         return True
 
@@ -230,7 +222,6 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
             send_booking_event(conn, booking_id, "BOOKING_TABLE_UPDATED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "clear_table", "source": "vk_staff"}})
         except Exception:
             pass
-        _refresh_peer_booking_card(conn, peer, booking_id)
         vk_send_message(peer, _booking_action_message("Стол снят.", f"Бронь #{booking_id}"))
         return True
 
@@ -240,7 +231,6 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
             send_booking_event(conn, booking_id, "BOOKING_DEPOSIT_CLEARED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "clear_deposit", "source": "vk_staff"}})
         except Exception:
             pass
-        _refresh_peer_booking_card(conn, peer, booking_id)
         vk_send_message(peer, _booking_action_message("Депозит снят.", f"Бронь #{booking_id}"))
         return True
 
@@ -314,7 +304,6 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
             notify_waiters_about_deposit_booking(conn, booking_id)
         except Exception:
             pass
-        _refresh_peer_booking_card(conn, peer, booking_id)
         vk_send_message(peer, f"Стол #{result['table_number']} назначен к брони #{booking_id}.")
         return True
 
@@ -333,7 +322,6 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
             notify_waiters_about_deposit_booking(conn, booking_id)
         except Exception:
             pass
-        _refresh_peer_booking_card(conn, peer, booking_id)
         booking_state = conn.execute("SELECT assigned_table_number FROM bookings WHERE id = ?", (booking_id,)).fetchone()
         if booking_state and not booking_state["assigned_table_number"]:
             _save_vk_pending_action(conn, peer_id=peer_id, from_id=from_id, booking_id=booking_id, mode="assign_table")
@@ -382,7 +370,6 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
                 send_table_event(conn, result["table_number"], "TABLE_RESTRICTED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "restrict_table", "table_number": result["table_number"], "restricted_until": result["restricted_until"], "source": "vk_staff"}})
         except Exception:
             pass
-        _refresh_peer_booking_card(conn, peer, booking_id)
         vk_send_message(peer, f"Стол #{result['table_number']} ограничен до {str(result['restricted_until'] or '')[11:16]}.")
         return True
 
