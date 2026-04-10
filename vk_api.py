@@ -1,3 +1,4 @@
+import json
 import time
 from typing import Any, Optional
 
@@ -53,16 +54,26 @@ def vk_api_post(method: str, data: dict[str, Any]) -> dict[str, Any]:
     raise RuntimeError(f"VK API request failed for {method}: {last_error}")
 
 
-def vk_send_message(peer_id: int, text: str, *, random_id: Optional[int] = None) -> dict[str, Any]:
+def vk_send_message(
+    peer_id: int,
+    text: str,
+    *,
+    random_id: Optional[int] = None,
+    keyboard: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     message_text = str(text or "").strip()
     if not message_text:
         raise ValueError("VK message text is empty")
 
+    payload: dict[str, Any] = {
+        "peer_id": int(peer_id),
+        "random_id": int(random_id if random_id is not None else time.time_ns() % 2147483647),
+        "message": message_text,
+    }
+    if keyboard is not None:
+        payload["keyboard"] = json.dumps(keyboard, ensure_ascii=False)
+
     return vk_api_post(
         "messages.send",
-        {
-            "peer_id": int(peer_id),
-            "random_id": int(random_id if random_id is not None else time.time_ns() % 2147483647),
-            "message": message_text,
-        },
+        payload,
     )

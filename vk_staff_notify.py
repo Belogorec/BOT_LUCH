@@ -2,6 +2,7 @@ from typing import Any, Optional
 
 from local_log import log_event, log_exception
 from vk_api import vk_api_enabled, vk_send_message
+from vk_staff_flow import build_vk_booking_keyboard, render_vk_booking_message
 
 
 def upsert_vk_staff_peer(conn, *, peer_id: object, from_id: object = "", message_text: str = "") -> bool:
@@ -41,55 +42,10 @@ def fetch_active_vk_staff_peers(conn) -> list[dict[str, Any]]:
 
 
 def build_vk_staff_booking_message(conn, booking_id: int, source: str = "") -> Optional[str]:
-    row = conn.execute(
-        """
-        SELECT
-            id, status, formname, name, phone_e164, phone_raw,
-            reservation_date, reservation_time, guests_count, comment,
-            assigned_table_number, deposit_amount, deposit_comment
-        FROM bookings
-        WHERE id = ?
-        """,
-        (int(booking_id),),
-    ).fetchone()
-    if not row:
+    try:
+        return render_vk_booking_message(conn, booking_id)
+    except Exception:
         return None
-
-    dt_value = " ".join(
-        part for part in [str(row["reservation_date"] or "").strip(), str(row["reservation_time"] or "").strip()] if part
-    ).strip() or "—"
-    guest_name = str(row["name"] or "").strip() or "—"
-    guest_phone = str(row["phone_e164"] or row["phone_raw"] or "").strip() or "—"
-    comment = str(row["comment"] or "").strip()
-    table_number = str(row["assigned_table_number"] or "").strip()
-    deposit_amount = row["deposit_amount"]
-    deposit_comment = str(row["deposit_comment"] or "").strip()
-    source_label = str(source or row["formname"] or "booking").strip()
-
-    lines = [
-        "Новая бронь",
-        f"ID: #{int(row['id'])}",
-        f"Статус: {str(row['status'] or 'WAITING').strip() or 'WAITING'}",
-        f"Дата/время: {dt_value}",
-        f"Гость: {guest_name}",
-        f"Телефон: {guest_phone}",
-        f"Гостей: {row['guests_count'] if row['guests_count'] is not None else '—'}",
-        f"Источник: {source_label}",
-    ]
-
-    if table_number:
-        lines.append(f"Стол: #{table_number}")
-    if deposit_amount:
-        deposit_line = f"Депозит: {int(deposit_amount)}"
-        if deposit_comment:
-            deposit_line += f" ({deposit_comment})"
-        lines.append(deposit_line)
-    if comment:
-        lines.append(f"Комментарий: {comment}")
-
-    lines.append("")
-    lines.append("Рабочий чат LUCH для хостес.")
-    return "\n".join(lines)
 
 
 def notify_vk_staff_about_new_booking(conn, booking_id: int, *, source: str = "") -> int:
@@ -113,7 +69,7 @@ def notify_vk_staff_about_new_booking(conn, booking_id: int, *, source: str = ""
         if not peer_id:
             continue
         try:
-            vk_send_message(int(peer_id), text)
+            vk_send_message(int(peer_id), text, keyboard=build_vk_booking_keyboard(int(booking_id)))
             sent += 1
             log_event("VK-STAFF-NOTIFY", status="sent", booking_id=int(booking_id), peer_id=peer_id, source=source or "-")
         except Exception as exc:

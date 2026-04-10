@@ -18,6 +18,7 @@ from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
 from telegram_api import tg_edit_message
 from vk_api import vk_api_enabled, vk_send_message
+from vk_staff_flow import parse_vk_message_payload, process_vk_booking_payload, process_vk_pending_text
 from vk_staff_notify import notify_vk_staff_about_new_booking, upsert_vk_staff_peer
 from booking_render import render_booking_card
 from booking_service import (
@@ -1175,9 +1176,15 @@ def vk_callback():
         peer_id = message.get("peer_id")
         from_id = message.get("from_id")
         text = str(message.get("text") or "").strip()
+        payload_data = parse_vk_message_payload(message)
         conn = connect()
         try:
             is_new_peer = upsert_vk_staff_peer(conn, peer_id=peer_id, from_id=from_id, message_text=text)
+            handled = False
+            if peer_id and payload_data:
+                handled = process_vk_booking_payload(conn, peer_id=peer_id, from_id=from_id, payload=payload_data)
+            if peer_id and text and not handled:
+                handled = process_vk_pending_text(conn, peer_id=peer_id, from_id=from_id, text=text)
             conn.commit()
         finally:
             conn.close()
@@ -1188,6 +1195,9 @@ def vk_callback():
             from_id=from_id or "-",
             text=(text[:120] if text else "-"),
         )
+        if handled:
+            log_event("VK-CALLBACK", status="message_handled", peer_id=peer_id or "-", from_id=from_id or "-")
+            return "ok"
         normalized_text = text.lower()
         should_reply = bool(is_new_peer or normalized_text in {"start", "/start", "старт", "help", "/help", "меню", "menu"})
         if peer_id and vk_api_enabled() and should_reply:
