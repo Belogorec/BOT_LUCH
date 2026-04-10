@@ -13,9 +13,11 @@ from dashboard_api import (
 )
 from config import BOT_TOKEN, VK_CALLBACK_SECRET, VK_CONFIRMATION_TOKEN, VK_GROUP_ID
 from db import connect, run_migrations, seed_discount_codes_from_csv
+from local_log import log_event, log_exception
 from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
 from telegram_api import tg_edit_message
+from vk_api import vk_api_enabled, vk_send_message
 from booking_render import render_booking_card
 from booking_service import (
     assign_table_to_booking,
@@ -1141,18 +1143,48 @@ def vk_callback():
     payload = request.get_json(silent=True) or {}
     event_type = str(payload.get("type") or "").strip()
     incoming_group_id = str(payload.get("group_id") or "").strip()
+    event_object = payload.get("object") or {}
+
+    log_event("VK-CALLBACK", status="incoming", event_type=event_type or "-", group_id=incoming_group_id or "-")
 
     if event_type == "confirmation":
         if VK_GROUP_ID and incoming_group_id and incoming_group_id != str(VK_GROUP_ID):
+            log_event("VK-CALLBACK", status="confirmation_forbidden", group_id=incoming_group_id or "-")
             return ("forbidden", 403)
         if not VK_CONFIRMATION_TOKEN:
+            log_event("VK-CALLBACK", status="confirmation_missing_token")
             return ("VK_CONFIRMATION_TOKEN missing", 500)
+        log_event("VK-CALLBACK", status="confirmation_ok")
         return VK_CONFIRMATION_TOKEN
 
     if not _vk_callback_authorized(payload):
+        log_event("VK-CALLBACK", status="forbidden", event_type=event_type or "-", group_id=incoming_group_id or "-")
         return ("forbidden", 403)
 
-    # Minimal first step: accept VK callbacks and respond with plain text "ok".
+    if event_type == "message_new":
+        message = event_object.get("message") or {}
+        peer_id = message.get("peer_id")
+        from_id = message.get("from_id")
+        text = str(message.get("text") or "").strip()
+        log_event(
+            "VK-CALLBACK",
+            status="message_new",
+            peer_id=peer_id or "-",
+            from_id=from_id or "-",
+            text=(text[:120] if text else "-"),
+        )
+        if peer_id and vk_api_enabled():
+            try:
+                vk_send_message(
+                    int(peer_id),
+                    "Привет! Бот Луч во ВКонтакте уже подключен. Это тестовый ответ. Следующим этапом добавим бронь и рабочий диалог.",
+                )
+                log_event("VK-CALLBACK", status="message_replied", peer_id=peer_id)
+            except Exception as exc:
+                log_exception("VK-CALLBACK", status="message_reply_failed", peer_id=peer_id, error=exc)
+        elif peer_id:
+            log_event("VK-CALLBACK", status="message_reply_skipped", reason="vk_api_disabled", peer_id=peer_id)
+
     return "ok"
 
 
