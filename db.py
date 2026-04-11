@@ -44,7 +44,11 @@ def _ensure_column(conn: sqlite3.Connection, table: str, col: str, ddl: str):
         return
     cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
     if col not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
 
 def init_schema(conn: sqlite3.Connection):

@@ -67,7 +67,19 @@ def fetch_active_vk_staff_peers(conn, *, bot_key: str) -> list[dict[str, Any]]:
         """,
         (str(bot_key or "").strip() or "hostess",),
     ).fetchall()
-    return [dict(row) for row in rows]
+
+    # After the multi-bot migration we can temporarily have both legacy rows
+    # ("2000000001") and namespaced rows ("hostess:2000000001") for the same
+    # VK chat. Keep only the freshest row per external peer to avoid duplicates.
+    deduped: list[dict[str, Any]] = []
+    seen_peer_ids: set[str] = set()
+    for row in rows:
+        peer_id = str(row["peer_id"] or "").strip()
+        if not peer_id or peer_id in seen_peer_ids:
+            continue
+        seen_peer_ids.add(peer_id)
+        deduped.append(dict(row))
+    return deduped
 
 
 def build_vk_staff_booking_message(conn, booking_id: int, source: str = "") -> Optional[str]:
