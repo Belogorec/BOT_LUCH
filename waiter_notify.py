@@ -33,8 +33,7 @@ def _load_waiter_booking_row(conn, booking_id: int):
     return row
 
 
-def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
-    row = _load_waiter_booking_row(conn, booking_id)
+def _build_waiter_message_from_row(row, *, rich_text: bool) -> Optional[str]:
     if not row:
         return None
 
@@ -43,21 +42,30 @@ def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
     if not table_number or not deposit_amount:
         return None
 
-    dt_value = " ".join(
-        part for part in [str(row["reservation_date"] or "").strip(), str(row["reservation_time"] or "").strip()] if part
-    ).strip()
-    guest_name = str(row["name"] or "").strip()
-    guest_phone = str(row["phone_e164"] or row["phone_raw"] or "").strip()
-    booking_comment = str(row["comment"] or "").strip()
-    deposit_comment = str(row["deposit_comment"] or "").strip()
-
-    lines = [
-        "<b>Стол с депозитом</b>",
-        f"<b>Стол:</b> #{int(table_number)}",
-        f"<b>Депозит:</b> {_h(int(deposit_amount))} руб.",
-    ]
+    if rich_text:
+        lines = [
+            "<b>Стол с депозитом</b>",
+            f"<b>Стол:</b> #{int(table_number)}",
+            f"<b>Депозит:</b> {_h(int(deposit_amount))} руб.",
+        ]
+    else:
+        lines = [
+            "Стол с депозитом",
+            f"Стол: #{int(table_number)}",
+            f"Депозит: {int(deposit_amount)} руб.",
+        ]
 
     return "\n".join(lines)
+
+
+def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
+    row = _load_waiter_booking_row(conn, booking_id)
+    return _build_waiter_message_from_row(row, rich_text=True)
+
+
+def build_waiter_vk_booking_message(conn, booking_id: int) -> Optional[str]:
+    row = _load_waiter_booking_row(conn, booking_id)
+    return _build_waiter_message_from_row(row, rich_text=False)
 
 
 def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
@@ -120,5 +128,6 @@ def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
 
     from vk_staff_notify import notify_vk_waiters
 
-    waiter_vk_sent = notify_vk_waiters(conn, text, source="deposit_booking", booking_id=int(booking_id))
+    waiter_vk_text = build_waiter_vk_booking_message(conn, booking_id) or text
+    waiter_vk_sent = notify_vk_waiters(conn, waiter_vk_text, source="deposit_booking", booking_id=int(booking_id))
     return delivered or bool(waiter_vk_sent)
