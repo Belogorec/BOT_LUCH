@@ -10,6 +10,7 @@
 - публичный callback URL: `https://botluch-production.up.railway.app/vk/callback`
 - backend endpoint в коде: `flask_app.py`
 - env-конфиг: `config.py`
+- на одном callback URL теперь можно держать несколько VK-сообществ, роутинг идёт по `group_id`
 
 ## Уже реализовано
 
@@ -61,6 +62,10 @@
 - `VK_ACCESS_TOKEN`
 - `VK_CALLBACK_SECRET`
 - `VK_CONFIRMATION_TOKEN`
+- `VK_WAITER_GROUP_ID`
+- `VK_WAITER_ACCESS_TOKEN`
+- `VK_WAITER_CALLBACK_SECRET`
+- `VK_WAITER_CONFIRMATION_TOKEN`
 - `VK_API_VERSION`
 
 ## Текущие рабочие значения для настройки VK
@@ -72,6 +77,10 @@
 - в локальном `.env`
 - в Railway Variables
 - в личном хранилище доступов
+
+Обратная совместимость:
+- старые переменные `VK_*` продолжают обслуживать текущий hostess-бот
+- для waiter-сообщества используются отдельные `VK_WAITER_*`
 
 ## Что заполнять в VK Callback API
 
@@ -98,6 +107,14 @@ VK отправляет `POST` на callback URL с телом вида:
 ```
 
 Сервер должен вернуть plain text строку подтверждения из `VK_CONFIRMATION_TOKEN`.
+
+Для второго waiter-сообщества сервер так же принимает:
+
+```json
+{ "type": "confirmation", "group_id": 237584508 }
+```
+
+и возвращает plain text строку из `VK_WAITER_CONFIRMATION_TOKEN`.
 
 После этого обычные события должны завершаться ответом:
 

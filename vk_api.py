@@ -4,23 +4,26 @@ from typing import Any, Optional
 
 import requests
 
-from config import VK_ACCESS_TOKEN, VK_API_VERSION
+from config import VK_API_VERSION, get_vk_bot_config
 
 _session = requests.Session()
 _session.trust_env = True
 
 
-def vk_api_enabled() -> bool:
-    return bool(VK_ACCESS_TOKEN)
+def vk_api_enabled(bot_key: str = "hostess") -> bool:
+    bot = get_vk_bot_config(bot_key)
+    return bool(bot.get("access_token"))
 
 
-def vk_api_post(method: str, data: dict[str, Any]) -> dict[str, Any]:
-    if not VK_ACCESS_TOKEN:
-        raise RuntimeError("VK_ACCESS_TOKEN missing")
+def vk_api_post(method: str, data: dict[str, Any], *, bot_key: str = "hostess") -> dict[str, Any]:
+    bot = get_vk_bot_config(bot_key)
+    access_token = str(bot.get("access_token") or "").strip()
+    if not access_token:
+        raise RuntimeError(f"VK access token missing for bot '{bot_key}'")
 
     payload = {
         **data,
-        "access_token": VK_ACCESS_TOKEN,
+        "access_token": access_token,
         "v": VK_API_VERSION,
     }
 
@@ -58,6 +61,7 @@ def vk_send_message(
     peer_id: int,
     text: str,
     *,
+    bot_key: str = "hostess",
     random_id: Optional[int] = None,
     keyboard: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
@@ -76,4 +80,5 @@ def vk_send_message(
     return vk_api_post(
         "messages.send",
         payload,
+        bot_key=bot_key,
     )

@@ -62,9 +62,7 @@ def build_waiter_booking_message(conn, booking_id: int) -> Optional[str]:
 
 def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
     target_chat_id = str(WAITER_CHAT_ID or "").strip()
-    if not target_chat_id:
-        log_event("WAITER-NOTIFY", status="skip", booking_id=int(booking_id), reason="missing_waiter_chat_id")
-        return False
+    has_waiter_tg = bool(target_chat_id)
 
     row = _load_waiter_booking_row(conn, booking_id)
     if not row:
@@ -83,13 +81,7 @@ def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
         )
         return False
     if not deposit_amount:
-        log_event(
-            "WAITER-NOTIFY",
-            status="skip",
-            booking_id=int(booking_id),
-            reason="missing_deposit",
-            table=table_number,
-        )
+        log_event("WAITER-NOTIFY", status="skip", booking_id=int(booking_id), reason="missing_deposit", table=table_number)
         return False
 
     text = build_waiter_booking_message(conn, booking_id)
@@ -104,20 +96,29 @@ def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
         )
         return False
 
-    log_event(
-        "WAITER-NOTIFY",
-        status="send",
-        booking_id=int(booking_id),
-        chat_id=target_chat_id,
-        table=table_number,
-        deposit=deposit_amount,
-    )
-    message_id = tg_send_message(target_chat_id, text)
-    log_event(
-        "WAITER-NOTIFY",
-        status="sent",
-        booking_id=int(booking_id),
-        chat_id=target_chat_id,
-        message_id=message_id,
-    )
-    return True
+    delivered = False
+    if has_waiter_tg:
+        log_event(
+            "WAITER-NOTIFY",
+            status="send",
+            booking_id=int(booking_id),
+            chat_id=target_chat_id,
+            table=table_number,
+            deposit=deposit_amount,
+        )
+        message_id = tg_send_message(target_chat_id, text)
+        log_event(
+            "WAITER-NOTIFY",
+            status="sent",
+            booking_id=int(booking_id),
+            chat_id=target_chat_id,
+            message_id=message_id,
+        )
+        delivered = True
+    else:
+        log_event("WAITER-NOTIFY", status="skip", booking_id=int(booking_id), reason="missing_waiter_chat_id")
+
+    from vk_staff_notify import notify_vk_waiters
+
+    waiter_vk_sent = notify_vk_waiters(conn, text, source="deposit_booking", booking_id=int(booking_id))
+    return delivered or bool(waiter_vk_sent)

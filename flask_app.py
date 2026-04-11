@@ -11,7 +11,7 @@ from dashboard_api import (
     admin_api_segments_impl,
     admin_api_load_impl,
 )
-from config import BOT_TOKEN, VK_CALLBACK_SECRET, VK_CONFIRMATION_TOKEN, VK_GROUP_ID
+from config import BOT_TOKEN, find_vk_bot_config_by_group_id
 from db import connect, run_migrations, seed_discount_codes_from_csv
 from local_log import log_event, log_exception
 from tg_handlers import tg_webhook_impl
@@ -100,17 +100,21 @@ def _crm_sync_authorized(req) -> bool:
     return bool(BOT_TOKEN) and incoming == BOT_TOKEN
 
 
-def _vk_callback_authorized(payload: dict) -> bool:
-    expected_group_id = str(VK_GROUP_ID or "").strip()
-    expected_secret = str(VK_CALLBACK_SECRET or "").strip()
+def _resolve_vk_callback_bot(payload: dict, *, require_secret: bool = True) -> dict:
     incoming_group_id = str(payload.get("group_id") or "").strip()
-    incoming_secret = str(payload.get("secret") or "").strip()
+    bot = find_vk_bot_config_by_group_id(incoming_group_id)
+    if not bot:
+        return {}
 
-    if expected_group_id and incoming_group_id and incoming_group_id != expected_group_id:
-        return False
+    if not require_secret:
+        return bot
+
+    incoming_secret = str(payload.get("secret") or "").strip()
+    expected_secret = str(bot.get("callback_secret") or "").strip()
+
     if expected_secret and incoming_secret != expected_secret:
-        return False
-    return True
+        return {}
+    return bot
 
 
 def _refresh_admin_booking_card(conn, booking_id: int) -> None:
@@ -1154,21 +1158,31 @@ def vk_callback():
     event_type = str(payload.get("type") or "").strip()
     incoming_group_id = str(payload.get("group_id") or "").strip()
     event_object = payload.get("object") or {}
+    vk_bot = _resolve_vk_callback_bot(payload, require_secret=event_type != "confirmation")
+    bot_key = str(vk_bot.get("bot_key") or "").strip() or "unknown"
+    role_hint = str(vk_bot.get("role_hint") or "").strip() or bot_key
 
-    log_event("VK-CALLBACK", status="incoming", event_type=event_type or "-", group_id=incoming_group_id or "-")
+    log_event(
+        "VK-CALLBACK",
+        status="incoming",
+        event_type=event_type or "-",
+        group_id=incoming_group_id or "-",
+        bot_key=bot_key,
+    )
 
     if event_type == "confirmation":
-        if VK_GROUP_ID and incoming_group_id and incoming_group_id != str(VK_GROUP_ID):
+        if not vk_bot:
             log_event("VK-CALLBACK", status="confirmation_forbidden", group_id=incoming_group_id or "-")
             return ("forbidden", 403)
-        if not VK_CONFIRMATION_TOKEN:
+        confirmation_token = str(vk_bot.get("confirmation_token") or "").strip()
+        if not confirmation_token:
             log_event("VK-CALLBACK", status="confirmation_missing_token")
-            return ("VK_CONFIRMATION_TOKEN missing", 500)
-        log_event("VK-CALLBACK", status="confirmation_ok")
-        return VK_CONFIRMATION_TOKEN
+            return ("VK confirmation token missing", 500)
+        log_event("VK-CALLBACK", status="confirmation_ok", bot_key=bot_key)
+        return confirmation_token
 
-    if not _vk_callback_authorized(payload):
-        log_event("VK-CALLBACK", status="forbidden", event_type=event_type or "-", group_id=incoming_group_id or "-")
+    if not vk_bot:
+        log_event("VK-CALLBACK", status="forbidden", event_type=event_type or "-", group_id=incoming_group_id or "-", bot_key=bot_key)
         return ("forbidden", 403)
 
     if event_type == "message_new":
@@ -1179,11 +1193,18 @@ def vk_callback():
         payload_data = parse_vk_message_payload(message)
         conn = connect()
         try:
-            is_new_peer = upsert_vk_staff_peer(conn, peer_id=peer_id, from_id=from_id, message_text=text)
+            is_new_peer = upsert_vk_staff_peer(
+                conn,
+                bot_key=bot_key,
+                role_hint=role_hint,
+                peer_id=peer_id,
+                from_id=from_id,
+                message_text=text,
+            )
             handled = False
-            if peer_id and payload_data:
+            if bot_key == "hostess" and peer_id and payload_data:
                 handled = process_vk_booking_payload(conn, peer_id=peer_id, from_id=from_id, payload=payload_data)
-            if peer_id and text and not handled:
+            if bot_key == "hostess" and peer_id and text and not handled:
                 handled = process_vk_pending_text(conn, peer_id=peer_id, from_id=from_id, text=text)
             conn.commit()
         finally:
@@ -1194,25 +1215,32 @@ def vk_callback():
             peer_id=peer_id or "-",
             from_id=from_id or "-",
             text=(text[:120] if text else "-"),
+            bot_key=bot_key,
         )
         if handled:
-            log_event("VK-CALLBACK", status="message_handled", peer_id=peer_id or "-", from_id=from_id or "-")
+            log_event("VK-CALLBACK", status="message_handled", peer_id=peer_id or "-", from_id=from_id or "-", bot_key=bot_key)
             return "ok"
         normalized_text = text.lower()
         should_reply = bool(is_new_peer or normalized_text in {"start", "/start", "старт", "help", "/help", "меню", "menu"})
-        if peer_id and vk_api_enabled() and should_reply:
+        if peer_id and vk_api_enabled(bot_key) and should_reply:
             try:
+                reply_text = (
+                    "Рабочий чат LUCH подключен.\nСюда будут приходить новые брони из действующих webhook-источников.\nСледующим этапом добавим управление бронями прямо из VK."
+                    if bot_key == "hostess"
+                    else "Чат официантов LUCH подключен.\nСюда будут приходить служебные уведомления по столам и депозитам."
+                )
                 vk_send_message(
                     int(peer_id),
-                    "Рабочий чат LUCH подключен.\nСюда будут приходить новые брони из действующих webhook-источников.\nСледующим этапом добавим управление бронями прямо из VK.",
+                    reply_text,
+                    bot_key=bot_key,
                 )
-                log_event("VK-CALLBACK", status="message_replied", peer_id=peer_id)
+                log_event("VK-CALLBACK", status="message_replied", peer_id=peer_id, bot_key=bot_key)
             except Exception as exc:
-                log_exception("VK-CALLBACK", status="message_reply_failed", peer_id=peer_id, error=exc)
+                log_exception("VK-CALLBACK", status="message_reply_failed", peer_id=peer_id, bot_key=bot_key, error=exc)
         elif peer_id and not should_reply:
-            log_event("VK-CALLBACK", status="message_recorded", peer_id=peer_id)
+            log_event("VK-CALLBACK", status="message_recorded", peer_id=peer_id, bot_key=bot_key)
         elif peer_id:
-            log_event("VK-CALLBACK", status="message_reply_skipped", reason="vk_api_disabled", peer_id=peer_id)
+            log_event("VK-CALLBACK", status="message_reply_skipped", reason="vk_api_disabled", peer_id=peer_id, bot_key=bot_key)
 
     return "ok"
 

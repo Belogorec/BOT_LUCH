@@ -36,6 +36,12 @@ def db():
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, col: str, ddl: str):
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if not table_exists:
+        return
     cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
     if col not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -247,6 +253,8 @@ def init_schema(conn: sqlite3.Connection):
         -- ===== vk_staff_peers =====
         CREATE TABLE IF NOT EXISTS vk_staff_peers (
           peer_id           TEXT PRIMARY KEY,
+          peer_external_id  TEXT,
+          bot_key           TEXT NOT NULL DEFAULT 'hostess',
           from_id           TEXT,
           is_active         INTEGER NOT NULL DEFAULT 1,
           role_hint         TEXT,
@@ -270,6 +278,21 @@ def init_schema(conn: sqlite3.Connection):
     _ensure_column(conn, "bookings", "deposit_set_by", "TEXT")
     _ensure_column(conn, "tg_bot_users", "has_shared_phone", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "tg_bot_users", "phone_e164", "TEXT")
+    _ensure_column(conn, "vk_staff_peers", "peer_external_id", "TEXT")
+    _ensure_column(conn, "vk_staff_peers", "bot_key", "TEXT NOT NULL DEFAULT 'hostess'")
+    conn.execute(
+        """
+        UPDATE vk_staff_peers
+        SET peer_external_id = peer_id
+        WHERE peer_external_id IS NULL OR trim(peer_external_id) = ''
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_vk_staff_peers_bot_active
+          ON vk_staff_peers(bot_key, is_active, updated_at)
+        """
+    )
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_reservation_token
@@ -298,6 +321,24 @@ def run_migrations(conn: sqlite3.Connection):
             """
         )
         conn.execute("PRAGMA user_version = 2")
+
+    if version < 3:
+        _ensure_column(conn, "vk_staff_peers", "peer_external_id", "TEXT")
+        _ensure_column(conn, "vk_staff_peers", "bot_key", "TEXT NOT NULL DEFAULT 'hostess'")
+        conn.execute(
+            """
+            UPDATE vk_staff_peers
+            SET peer_external_id = peer_id
+            WHERE peer_external_id IS NULL OR trim(peer_external_id) = ''
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_vk_staff_peers_bot_active
+              ON vk_staff_peers(bot_key, is_active, updated_at)
+            """
+        )
+        conn.execute("PRAGMA user_version = 3")
 
     # Defensive idempotent step for environments with inconsistent user_version.
     init_schema(conn)
