@@ -41,10 +41,23 @@ def parse_vk_message_payload(message: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def parse_vk_event_payload(event_object: dict[str, Any]) -> dict[str, Any]:
+    raw = event_object.get("payload")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
 def _vk_button(label: str, payload: dict[str, Any], color: str = "secondary") -> dict[str, Any]:
     return {
         "action": {
-            "type": "text",
+            "type": "callback",
             "label": label,
             "payload": json.dumps(payload, ensure_ascii=False),
         },

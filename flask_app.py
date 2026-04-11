@@ -17,8 +17,8 @@ from local_log import log_event, log_exception
 from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
 from telegram_api import tg_edit_message
-from vk_api import vk_api_enabled, vk_send_message
-from vk_staff_flow import parse_vk_message_payload, process_vk_booking_payload, process_vk_pending_text
+from vk_api import vk_answer_message_event, vk_api_enabled, vk_send_message
+from vk_staff_flow import parse_vk_event_payload, parse_vk_message_payload, process_vk_booking_payload, process_vk_pending_text
 from vk_staff_notify import notify_vk_staff_about_new_booking, upsert_vk_staff_peer
 from booking_render import render_booking_card
 from booking_service import (
@@ -1241,6 +1241,49 @@ def vk_callback():
             log_event("VK-CALLBACK", status="message_recorded", peer_id=peer_id, bot_key=bot_key)
         elif peer_id:
             log_event("VK-CALLBACK", status="message_reply_skipped", reason="vk_api_disabled", peer_id=peer_id, bot_key=bot_key)
+
+    if event_type == "message_event":
+        peer_id = event_object.get("peer_id")
+        from_id = event_object.get("user_id")
+        event_id = str(event_object.get("event_id") or "").strip()
+        payload_data = parse_vk_event_payload(event_object)
+
+        handled = False
+        conn = connect()
+        try:
+            if bot_key == "hostess" and peer_id and from_id and payload_data:
+                handled = process_vk_booking_payload(conn, peer_id=peer_id, from_id=from_id, payload=payload_data)
+            conn.commit()
+        finally:
+            conn.close()
+
+        log_event(
+            "VK-CALLBACK",
+            status="message_event",
+            peer_id=peer_id or "-",
+            from_id=from_id or "-",
+            bot_key=bot_key,
+            handled=handled,
+        )
+
+        if event_id and peer_id and from_id and vk_api_enabled(bot_key):
+            action_name = str(payload_data.get("action") or "").strip()
+            snackbar_text = (
+                "Напишите ответ в чат."
+                if action_name in {"prompt_assign_table", "prompt_set_deposit", "prompt_restrict_table"}
+                else ("Команда принята." if handled else "Действие недоступно.")
+            )
+            try:
+                vk_answer_message_event(
+                    event_id=event_id,
+                    user_id=int(from_id),
+                    peer_id=int(peer_id),
+                    event_data={"type": "show_snackbar", "text": snackbar_text},
+                    bot_key=bot_key,
+                )
+                log_event("VK-CALLBACK", status="message_event_answered", peer_id=peer_id or "-", from_id=from_id or "-", bot_key=bot_key)
+            except Exception as exc:
+                log_exception("VK-CALLBACK", status="message_event_answer_failed", peer_id=peer_id or "-", from_id=from_id or "-", bot_key=bot_key, error=exc)
 
     return "ok"
 

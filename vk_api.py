@@ -82,3 +82,24 @@ def vk_send_message(
         payload,
         bot_key=bot_key,
     )
+
+
+def vk_answer_message_event(
+    *,
+    event_id: str,
+    user_id: int,
+    peer_id: int,
+    event_data: dict[str, Any],
+    bot_key: str = "hostess",
+) -> dict[str, Any]:
+    payload = {
+        "event_id": str(event_id or "").strip(),
+        "user_id": int(user_id),
+        "peer_id": int(peer_id),
+        "event_data": json.dumps(event_data, ensure_ascii=False),
+    }
+    return vk_api_post(
+        "messages.sendMessageEventAnswer",
+        payload,
+        bot_key=bot_key,
+    )
