@@ -71,7 +71,7 @@ def _build_payload(conn, booking_id: int, event_name: str, meta: Optional[dict[s
                 FROM venue_tables
                 WHERE table_number = ?
                 """,
-                (int(target_table_number),),
+                (str(target_table_number),),
             ).fetchone()
             if table_row:
                 table_payload = _row_to_dict(table_row)
@@ -91,14 +91,23 @@ def _build_payload(conn, booking_id: int, event_name: str, meta: Optional[dict[s
     return payload
 
 
-def _build_table_payload(conn, table_number: int, event_name: str, meta: Optional[dict[str, Any]]) -> dict[str, Any]:
+def build_booking_sync_payload(
+    conn,
+    booking_id: int,
+    event_name: str = "BOOKING_UPSERT",
+    meta: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    return _build_payload(conn, booking_id, event_name, meta)
+
+
+def _build_table_payload(conn, table_number: str, event_name: str, meta: Optional[dict[str, Any]]) -> dict[str, Any]:
     table_row = conn.execute(
         """
         SELECT table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
         FROM venue_tables
         WHERE table_number = ?
         """,
-        (int(table_number),),
+        (str(table_number),),
     ).fetchone()
     if not table_row:
         raise ValueError("table_not_found")
@@ -117,7 +126,7 @@ def send_booking_event(conn, booking_id: int, event_name: str, meta: Optional[di
         return False
 
     try:
-        payload = _build_payload(conn, booking_id, event_name, meta)
+        payload = build_booking_sync_payload(conn, booking_id, event_name, meta)
     except Exception:
         traceback.print_exc()
         return False
@@ -152,7 +161,7 @@ def send_booking_event(conn, booking_id: int, event_name: str, meta: Optional[di
     return False
 
 
-def send_table_event(conn, table_number: int, event_name: str, meta: Optional[dict[str, Any]] = None) -> bool:
+def send_table_event(conn, table_number: str, event_name: str, meta: Optional[dict[str, Any]] = None) -> bool:
     if not CRM_API_URL:
         return False
 

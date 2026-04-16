@@ -323,6 +323,54 @@ def crm_sync_booking(booking_id: int):
         conn.close()
 
 
+@app.route("/admin/api/crm-sync/bookings/recent", methods=["GET"])
+def crm_sync_recent_bookings():
+    if not _crm_sync_authorized(request):
+        return {"ok": False, "error": "forbidden"}, 403
+
+    try:
+        limit = max(1, min(int(request.args.get("limit", 200) or 200), 500))
+    except (TypeError, ValueError):
+        limit = 200
+
+    try:
+        days = max(1, min(int(request.args.get("days", 30) or 30), 180))
+    except (TypeError, ValueError):
+        days = 30
+
+    conn = connect()
+    try:
+        from crm_sync import build_booking_sync_payload
+
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM bookings
+            WHERE COALESCE(formname, '') != 'manual_table'
+              AND COALESCE(status, 'WAITING') NOT IN ('DECLINED', 'CANCELLED', 'NO_SHOW', 'COMPLETED')
+              AND datetime(created_at) >= datetime('now', ?)
+            ORDER BY datetime(updated_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (f"-{int(days)} days", int(limit)),
+        ).fetchall()
+
+        items = [
+            build_booking_sync_payload(
+                conn,
+                int(row["id"]),
+                "BOOKING_UPSERT",
+                {"actor_tg_id": "system", "actor_name": "recent_pull", "payload": {"source": "recent_pull"}},
+            )
+            for row in rows
+        ]
+        return {"ok": True, "items": items, "count": len(items)}, 200
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}, 500
+    finally:
+        conn.close()
+
+
 @app.route("/admin/api/crm-sync/table", methods=["POST"])
 def crm_sync_table():
     if not _crm_sync_authorized(request):
