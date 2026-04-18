@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from core_sync import sync_booking_state_to_core, sync_booking_to_core
 from booking_service import (
     assign_table_to_booking,
     clear_booking_deposit,
@@ -18,6 +19,7 @@ from booking_service import (
 from crm_sync import send_booking_event, send_table_event
 from vk_api import vk_send_message
 from waiter_notify import notify_waiters_about_deposit_booking
+from integration_service import record_inbound_event
 
 
 def _vk_actor_id(from_id: object) -> str:
@@ -210,9 +212,22 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
         return True
 
     if action == "confirm":
+        core_reservation_id = sync_booking_to_core(conn, booking_id)
+        record_inbound_event(
+            conn,
+            platform="vk",
+            bot_scope="hostess",
+            event_type="booking_confirm",
+            payload={"booking_id": booking_id, "source": "vk_staff"},
+            actor_external_id=str(actor_id or ""),
+            actor_display_name=str(actor_name or ""),
+            peer_external_id=str(peer or ""),
+            reservation_id=core_reservation_id,
+        )
         conn.execute("UPDATE bookings SET status='CONFIRMED', updated_at=datetime('now') WHERE id=?", (booking_id,))
         log_booking_event(conn, booking_id, "CONFIRMED", actor_id, actor_name, {"source": "vk_staff"})
         ensure_visit_from_confirmed_booking(conn, booking_id, actor_id, actor_name)
+        sync_booking_state_to_core(conn, booking_id)
         try:
             send_booking_event(conn, booking_id, "BOOKING_CONFIRMED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"source": "vk_staff"}})
         except Exception:
@@ -296,7 +311,7 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
     if mode == "assign_table":
         table_number = normalize_table_number(message_text)
         if not table_number:
-            vk_send_message(peer, "Номер стола должен быть положительным целым числом.")
+            vk_send_message(peer, "Номер стола должен быть корректным. Например: 221 или 221.1.")
             return True
         booking_row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
         if not booking_row:
@@ -346,7 +361,7 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
     if mode == "restrict_table_number":
         table_number = normalize_table_number(message_text)
         if not table_number:
-            vk_send_message(peer, "Номер стола должен быть положительным целым числом.")
+            vk_send_message(peer, "Номер стола должен быть корректным. Например: 221 или 221.1.")
             return True
         flow["mode"] = "restrict_table_hours"
         flow["table_number"] = table_number

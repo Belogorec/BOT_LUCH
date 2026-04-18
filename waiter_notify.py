@@ -45,13 +45,13 @@ def _build_waiter_message_from_row(row, *, rich_text: bool) -> Optional[str]:
     if rich_text:
         lines = [
             "<b>Стол с депозитом</b>",
-            f"<b>Стол:</b> #{int(table_number)}",
+            f"<b>Стол:</b> #{table_number}",
             f"<b>Депозит:</b> {_h(int(deposit_amount))} руб.",
         ]
     else:
         lines = [
             "Стол с депозитом",
-            f"Стол: #{int(table_number)}",
+            f"Стол: #{table_number}",
             f"Депозит: {int(deposit_amount)} руб.",
         ]
 

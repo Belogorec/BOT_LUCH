@@ -51,6 +51,46 @@ def _ensure_column(conn: sqlite3.Connection, table: str, col: str, ddl: str):
                 raise
 
 
+def _migrate_venue_tables_table_number_to_text(conn: sqlite3.Connection):
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='venue_tables'",
+    ).fetchone()
+    if not table_exists:
+        return
+
+    cols = conn.execute("PRAGMA table_info(venue_tables)").fetchall()
+    table_number_col = next((row for row in cols if row["name"] == "table_number"), None)
+    if not table_number_col:
+        return
+    if str(table_number_col["type"] or "").strip().upper() == "TEXT":
+        return
+
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS venue_tables__new;
+        CREATE TABLE venue_tables__new (
+          table_number       TEXT PRIMARY KEY,
+          label              TEXT NOT NULL DEFAULT 'NONE',
+          restricted_until   TEXT,
+          restriction_comment TEXT,
+          updated_by         TEXT,
+          updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO venue_tables__new (
+          table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
+        )
+        SELECT
+          CAST(table_number AS TEXT), label, restricted_until, restriction_comment, updated_by, updated_at, created_at
+        FROM venue_tables;
+
+        DROP TABLE venue_tables;
+        ALTER TABLE venue_tables__new RENAME TO venue_tables;
+        """
+    )
+
+
 def init_schema(conn: sqlite3.Connection):
     conn.executescript(
         """
@@ -137,7 +177,7 @@ def init_schema(conn: sqlite3.Connection):
 
         -- ===== venue_tables =====
         CREATE TABLE IF NOT EXISTS venue_tables (
-          table_number       INTEGER PRIMARY KEY,
+          table_number       TEXT PRIMARY KEY,
           label              TEXT NOT NULL DEFAULT 'NONE',
           restricted_until   TEXT,
           restriction_comment TEXT,
@@ -269,21 +309,90 @@ def init_schema(conn: sqlite3.Connection):
         );
 
         CREATE INDEX IF NOT EXISTS idx_vk_staff_peers_active ON vk_staff_peers(is_active, updated_at);
+
+        -- ===== guest_channel_bindings =====
+        CREATE TABLE IF NOT EXISTS guest_channel_bindings (
+          id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+          guest_phone_e164      TEXT NOT NULL,
+          channel_type          TEXT NOT NULL,
+          external_user_id      TEXT NOT NULL,
+          external_username     TEXT,
+          external_display_name TEXT,
+          status                TEXT NOT NULL DEFAULT 'active',
+          is_verified           INTEGER NOT NULL DEFAULT 1,
+          linked_at             TEXT NOT NULL DEFAULT (datetime('now')),
+          created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_guest_channel_bindings_channel_external
+          ON guest_channel_bindings(channel_type, external_user_id);
+        CREATE INDEX IF NOT EXISTS idx_guest_channel_bindings_guest
+          ON guest_channel_bindings(guest_phone_e164, channel_type, status, updated_at);
+
+        -- ===== guest_binding_tokens =====
+        CREATE TABLE IF NOT EXISTS guest_binding_tokens (
+          id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+          token_hash               TEXT NOT NULL,
+          reservation_id           INTEGER NOT NULL,
+          guest_phone_e164         TEXT,
+          channel_type             TEXT NOT NULL,
+          status                   TEXT NOT NULL DEFAULT 'active',
+          expires_at               TEXT NOT NULL,
+          used_at                  TEXT,
+          used_by_external_user_id TEXT,
+          created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at               TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (reservation_id) REFERENCES bookings(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_guest_binding_tokens_hash ON guest_binding_tokens(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_guest_binding_tokens_reservation
+          ON guest_binding_tokens(reservation_id, channel_type, status, expires_at);
+
+        -- ===== notification_delivery_log =====
+        CREATE TABLE IF NOT EXISTS notification_delivery_log (
+          id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+          reservation_id        INTEGER,
+          guest_phone_e164      TEXT,
+          channel_binding_id    INTEGER,
+          channel_type          TEXT NOT NULL,
+          event_type            TEXT NOT NULL,
+          payload_snapshot_json TEXT,
+          delivery_status       TEXT NOT NULL,
+          provider_message_id   TEXT,
+          error_text            TEXT,
+          created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (reservation_id) REFERENCES bookings(id) ON DELETE SET NULL,
+          FOREIGN KEY (channel_binding_id) REFERENCES guest_channel_bindings(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_notification_delivery_log_reservation
+          ON notification_delivery_log(reservation_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_notification_delivery_log_guest
+          ON notification_delivery_log(guest_phone_e164, created_at);
         """
     )
 
     _ensure_column(conn, "guests", "tags_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(conn, "bookings", "user_chat_id", "TEXT")
     _ensure_column(conn, "bookings", "reservation_token", "TEXT")
-    _ensure_column(conn, "bookings", "assigned_table_number", "INTEGER")
+    _ensure_column(conn, "bookings", "assigned_table_number", "TEXT")
     _ensure_column(conn, "bookings", "deposit_amount", "INTEGER")
     _ensure_column(conn, "bookings", "deposit_comment", "TEXT")
     _ensure_column(conn, "bookings", "deposit_set_at", "TEXT")
     _ensure_column(conn, "bookings", "deposit_set_by", "TEXT")
+    _ensure_column(conn, "bookings", "preferred_channel", "TEXT")
+    _ensure_column(conn, "bookings", "service_notifications_enabled", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "bookings", "marketing_notifications_enabled", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "bookings", "consent_source", "TEXT")
+    _ensure_column(conn, "bookings", "consent_timestamp", "TEXT")
+    _ensure_column(conn, "bookings", "consent_text_version", "TEXT")
     _ensure_column(conn, "tg_bot_users", "has_shared_phone", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "tg_bot_users", "phone_e164", "TEXT")
     _ensure_column(conn, "vk_staff_peers", "peer_external_id", "TEXT")
     _ensure_column(conn, "vk_staff_peers", "bot_key", "TEXT NOT NULL DEFAULT 'hostess'")
+    _migrate_venue_tables_table_number_to_text(conn)
     conn.execute(
         """
         UPDATE vk_staff_peers
@@ -302,6 +411,42 @@ def init_schema(conn: sqlite3.Connection):
         CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_reservation_token
           ON bookings(reservation_token)
           WHERE reservation_token IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_guest_channel_bindings_channel_external
+          ON guest_channel_bindings(channel_type, external_user_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_guest_channel_bindings_guest
+          ON guest_channel_bindings(guest_phone_e164, channel_type, status, updated_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_guest_binding_tokens_hash
+          ON guest_binding_tokens(token_hash)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_guest_binding_tokens_reservation
+          ON guest_binding_tokens(reservation_id, channel_type, status, expires_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_notification_delivery_log_reservation
+          ON notification_delivery_log(reservation_id, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_notification_delivery_log_guest
+          ON notification_delivery_log(guest_phone_e164, created_at)
         """
     )
 
@@ -343,6 +488,17 @@ def run_migrations(conn: sqlite3.Connection):
             """
         )
         conn.execute("PRAGMA user_version = 3")
+        version = 3
+
+    if version < 4:
+        _ensure_column(conn, "bookings", "preferred_channel", "TEXT")
+        _ensure_column(conn, "bookings", "service_notifications_enabled", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(conn, "bookings", "marketing_notifications_enabled", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "bookings", "consent_source", "TEXT")
+        _ensure_column(conn, "bookings", "consent_timestamp", "TEXT")
+        _ensure_column(conn, "bookings", "consent_text_version", "TEXT")
+        init_schema(conn)
+        conn.execute("PRAGMA user_version = 4")
 
     # Defensive idempotent step for environments with inconsistent user_version.
     init_schema(conn)

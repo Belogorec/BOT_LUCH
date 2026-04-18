@@ -8,6 +8,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "enabled"}
+
+
 def _parse_admin_ids(raw: str) -> list[str]:
     if not raw:
         return []
@@ -64,6 +69,10 @@ VK_WAITER_GROUP_ID = os.getenv("VK_WAITER_GROUP_ID", "").strip()
 VK_WAITER_ACCESS_TOKEN = os.getenv("VK_WAITER_ACCESS_TOKEN", "").strip()
 VK_WAITER_CALLBACK_SECRET = os.getenv("VK_WAITER_CALLBACK_SECRET", "").strip()
 VK_WAITER_CONFIRMATION_TOKEN = os.getenv("VK_WAITER_CONFIRMATION_TOKEN", "").strip()
+VK_GUEST_GROUP_ID = os.getenv("VK_GUEST_GROUP_ID", "").strip()
+VK_GUEST_ACCESS_TOKEN = os.getenv("VK_GUEST_ACCESS_TOKEN", "").strip()
+VK_GUEST_CALLBACK_SECRET = os.getenv("VK_GUEST_CALLBACK_SECRET", "").strip()
+VK_GUEST_CONFIRMATION_TOKEN = os.getenv("VK_GUEST_CONFIRMATION_TOKEN", "").strip()
 
 # Backward-compatible aliases for the original hostess bot env names.
 VK_GROUP_ID = VK_HOSTESS_GROUP_ID
@@ -109,6 +118,14 @@ VK_BOTS: dict[str, dict[str, str]] = {
         callback_secret=VK_WAITER_CALLBACK_SECRET,
         confirmation_token=VK_WAITER_CONFIRMATION_TOKEN,
     ),
+    "guest": _build_vk_bot_config(
+        bot_key="guest",
+        role_hint="guest",
+        group_id=VK_GUEST_GROUP_ID,
+        access_token=VK_GUEST_ACCESS_TOKEN,
+        callback_secret=VK_GUEST_CALLBACK_SECRET,
+        confirmation_token=VK_GUEST_CONFIRMATION_TOKEN,
+    ),
 }
 
 
@@ -135,3 +152,12 @@ if BOT_TOKEN:
     TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 else:
     TG_API = ""
+
+GUEST_COMM_ENABLED = _env_flag("GUEST_COMM_ENABLED", default=False)
+CORE_ONLY_MODE = _env_flag("CORE_ONLY_MODE", default=False)
+GUEST_BINDING_TOKEN_TTL_MIN = int(os.getenv("GUEST_BINDING_TOKEN_TTL_MIN", "45").strip() or "45")
+GUEST_BINDING_TOKEN_PEPPER = os.getenv("GUEST_BINDING_TOKEN_PEPPER", "").strip()
+GUEST_PUBLIC_BASE_URL = os.getenv("GUEST_PUBLIC_BASE_URL", "").strip()
+TG_BOT_USERNAME = os.getenv("TG_BOT_USERNAME", "").strip().lstrip("@")
+TG_BINDING_START_PREFIX = os.getenv("TG_BINDING_START_PREFIX", "bind_").strip() or "bind_"
+GUEST_NOTIFICATION_TEST_MODE = _env_flag("GUEST_NOTIFICATION_TEST_MODE", default=False)

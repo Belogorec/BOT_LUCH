@@ -1,13 +1,16 @@
 import json
+import re
 from typing import Optional
 from datetime import datetime, timedelta
 
+from core_sync import sync_booking_state_to_core, sync_table_state_to_core
 from db import get_tags, set_tags
 from config import BUSINESS_TZ_OFFSET_HOURS
 
 TABLE_LABELS = {"NONE", "DEPOSIT", "RESTRICTED"}
 INACTIVE_BOOKING_STATUSES = {"DECLINED", "CANCELLED", "NO_SHOW"}
 BUSINESS_NOW_SQL = f"{BUSINESS_TZ_OFFSET_HOURS:+d} hours"
+TABLE_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
 
 def now_iso_seconds_utc() -> str:
@@ -98,7 +101,7 @@ def log_booking_event(conn, booking_id: int, event_type: str, actor_id: str, act
 
 def log_table_event(
     conn,
-    table_number: int,
+    table_number: str,
     event_type: str,
     actor_id: str,
     actor_name: str,
@@ -111,7 +114,7 @@ def log_table_event(
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
-            int(table_number),
+            table_number,
             booking_id,
             event_type,
             actor_id,
@@ -163,12 +166,16 @@ def toggle_guest_tag(conn, phone_e164: str, tag: str) -> tuple[list[str], str]:
     return tags2, action
 
 
-def normalize_table_number(value) -> Optional[int]:
-    try:
-        table_number = int(str(value).strip())
-    except (TypeError, ValueError):
+def normalize_table_number(value) -> Optional[str]:
+    raw = str(value or "").strip().replace(",", ".")
+    if not raw or not TABLE_NUMBER_RE.fullmatch(raw):
         return None
-    return table_number if table_number > 0 else None
+    parts = raw.split(".", 1)
+    head = str(int(parts[0]))
+    if len(parts) == 1:
+        return head
+    tail = parts[1].rstrip("0")
+    return f"{head}.{tail}" if tail else head
 
 
 def _booking_reservation_dt(booking_row) -> str:
@@ -224,14 +231,14 @@ def parse_restriction_until(value: str) -> Optional[str]:
     return parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def get_table_state(conn, table_number: int):
+def get_table_state(conn, table_number: str):
     return conn.execute(
         """
         SELECT table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
         FROM venue_tables
         WHERE table_number = ?
         """,
-        (int(table_number),),
+        (table_number,),
     ).fetchone()
 
 
@@ -248,7 +255,7 @@ def get_active_table_restrictions(conn):
     ).fetchall()
 
 
-def get_table_booking_conflicts(conn, table_number: int, reservation_dt: str, exclude_booking_id: int = 0):
+def get_table_booking_conflicts(conn, table_number: str, reservation_dt: str, exclude_booking_id: int = 0):
     if not reservation_dt:
         return []
     return conn.execute(
@@ -261,11 +268,11 @@ def get_table_booking_conflicts(conn, table_number: int, reservation_dt: str, ex
           AND COALESCE(status, 'WAITING') NOT IN ('DECLINED', 'CANCELLED', 'NO_SHOW')
         ORDER BY id ASC
         """,
-        (int(table_number), reservation_dt, int(exclude_booking_id or 0)),
+        (table_number, reservation_dt, int(exclude_booking_id or 0)),
     ).fetchall()
 
 
-def get_table_assignment_conflicts(conn, booking_row, table_number: int, exclude_booking_id: int = 0) -> dict:
+def get_table_assignment_conflicts(conn, booking_row, table_number: str, exclude_booking_id: int = 0) -> dict:
     conflicts = [dict(r) for r in get_table_booking_conflicts(conn, table_number, _booking_reservation_dt(booking_row), exclude_booking_id)]
     restricted_row = conn.execute(
         """
@@ -277,7 +284,7 @@ def get_table_assignment_conflicts(conn, booking_row, table_number: int, exclude
           AND datetime(restricted_until) > datetime('now', '{BUSINESS_NOW_SQL}')
         LIMIT 1
         """.format(BUSINESS_NOW_SQL=BUSINESS_NOW_SQL),
-        (int(table_number),),
+        (table_number,),
     ).fetchone()
     return {
         "booking_conflicts": conflicts,
@@ -285,7 +292,7 @@ def get_table_assignment_conflicts(conn, booking_row, table_number: int, exclude
     }
 
 
-def _get_active_restriction_state(conn, table_number: int) -> Optional[dict]:
+def _get_active_restriction_state(conn, table_number: str) -> Optional[dict]:
     if not normalize_table_number(table_number):
         return None
     row = conn.execute(
@@ -298,7 +305,7 @@ def _get_active_restriction_state(conn, table_number: int) -> Optional[dict]:
           AND datetime(restricted_until) > datetime('now', '{BUSINESS_NOW_SQL}')
         LIMIT 1
         """.format(BUSINESS_NOW_SQL=BUSINESS_NOW_SQL),
-        (int(table_number),),
+        (table_number,),
     ).fetchone()
     return dict(row) if row else None
 
@@ -306,7 +313,7 @@ def _get_active_restriction_state(conn, table_number: int) -> Optional[dict]:
 def assign_table_to_booking(
     conn,
     booking_id: int,
-    table_number: int,
+    table_number: str,
     actor_id: str,
     actor_name: str,
     force_override: bool = False,
@@ -324,7 +331,7 @@ def assign_table_to_booking(
         raise ValueError("table_conflict")
 
     prev_table = booking_row["assigned_table_number"]
-    moved_restriction = _get_active_restriction_state(conn, prev_table) if prev_table and int(prev_table) != normalized_table else None
+    moved_restriction = _get_active_restriction_state(conn, prev_table) if prev_table and prev_table != normalized_table else None
     conn.execute(
         """
         UPDATE bookings
@@ -354,7 +361,7 @@ def assign_table_to_booking(
                 updated_at = datetime('now')
             WHERE table_number = ?
             """,
-            (actor_id, int(prev_table)),
+            (actor_id, prev_table),
         )
         conn.execute(
             """
@@ -387,8 +394,11 @@ def assign_table_to_booking(
     log_booking_event(conn, booking_id, event_type, actor_id, actor_name, payload)
     log_table_event(conn, normalized_table, event_type, actor_id, actor_name, payload, booking_id=booking_id)
     if moved_restriction and prev_table:
-        log_table_event(conn, int(prev_table), "TABLE_LABEL_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
+        log_table_event(conn, prev_table, "TABLE_LABEL_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
         log_table_event(conn, normalized_table, "TABLE_RESTRICTED", actor_id, actor_name, payload, booking_id=booking_id)
+        sync_table_state_to_core(conn, prev_table)
+    sync_booking_state_to_core(conn, booking_id)
+    sync_table_state_to_core(conn, normalized_table)
     return {"table_number": normalized_table, "conflicts": conflicts, "previous_table_number": prev_table}
 
 
@@ -409,7 +419,9 @@ def clear_table_assignment(conn, booking_id: int, actor_id: str, actor_name: str
     payload = {"old_table_number": prev_table, "new_table_number": None}
     log_booking_event(conn, booking_id, "TABLE_CLEARED", actor_id, actor_name, payload)
     if prev_table:
-        log_table_event(conn, int(prev_table), "TABLE_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
+        log_table_event(conn, prev_table, "TABLE_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
+        sync_table_state_to_core(conn, prev_table)
+    sync_booking_state_to_core(conn, booking_id)
     return {"previous_table_number": prev_table}
 
 
@@ -491,7 +503,7 @@ def clear_booking_deposit(
 
 def set_table_label(
     conn,
-    table_number: int,
+    table_number: str,
     label: str,
     actor_id: str,
     actor_name: str,
@@ -573,6 +585,8 @@ def set_table_label(
     log_table_event(conn, normalized_table, event_type, actor_id, actor_name, payload, booking_id=booking_id)
     if booking_id:
         log_booking_event(conn, booking_id, event_type, actor_id, actor_name, payload)
+        sync_booking_state_to_core(conn, booking_id)
+    sync_table_state_to_core(conn, normalized_table)
     return {
         "table_number": normalized_table,
         "label": normalized_label,
@@ -695,6 +709,7 @@ def mark_booking_cancelled(conn, booking_id: int, actor_id: str, actor_name: str
             actor_name,
             {"booking_id": booking_id, "reservation_dt": b["reservation_dt"]},
         )
+    sync_booking_state_to_core(conn, booking_id)
 
 
 def get_guest_summary(conn, phone_e164: str):

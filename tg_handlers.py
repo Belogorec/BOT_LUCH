@@ -8,6 +8,7 @@ import requests
 
 from flask import request, abort
 
+from core_sync import sync_booking_state_to_core, sync_booking_to_core
 from config import (
     TG_WEBHOOK_SECRET,
     PROMO_ADMIN_IDS,
@@ -48,6 +49,10 @@ from booking_render import (
 from crm_sync import send_booking_event, send_table_event
 from db import connect
 from waiter_notify import notify_waiters_about_deposit_booking
+from config import GUEST_COMM_ENABLED, TG_BINDING_START_PREFIX
+from channel_binding_service import consume_binding_token_once
+from notification_dispatcher import send_service_notification
+from integration_service import record_inbound_event
 
 MINIAPP_URL = os.environ.get(
     "MINIAPP_URL",
@@ -176,7 +181,7 @@ def _load_pending_reply_payload(row) -> dict:
         return {}
 
 
-def _format_table_conflict_message(conflicts: dict, table_number: int) -> str:
+def _format_table_conflict_message(conflicts: dict, table_number: str) -> str:
     lines = [f"⚠️ Стол <b>#{table_number}</b> уже занят или ограничен."]
     restricted = conflicts.get("restricted")
     if restricted:
@@ -446,12 +451,26 @@ def tg_webhook_impl():
                     action = parts[3].strip().lower()
 
                     if action == "confirm":
+                        core_reservation_id = sync_booking_to_core(conn, booking_id)
+                        record_inbound_event(
+                            conn,
+                            platform="telegram",
+                            bot_scope="hostess",
+                            event_type="booking_confirm",
+                            payload={"booking_id": booking_id, "callback_data": data},
+                            external_event_id=str(cq_id or ""),
+                            actor_external_id=str(actor_id or ""),
+                            actor_display_name=str(actor_name or ""),
+                            peer_external_id=str(chat_id or ""),
+                            reservation_id=core_reservation_id,
+                        )
                         conn.execute(
                             "UPDATE bookings SET status='CONFIRMED', updated_at=datetime('now') WHERE id=?",
                             (booking_id,),
                         )
                         log_booking_event(conn, booking_id, "CONFIRMED", actor_id, actor_name, {})
                         ensure_visit_from_confirmed_booking(conn, booking_id, actor_id, actor_name)
+                        sync_booking_state_to_core(conn, booking_id)
 
                         # уведомление пользователю только после подтверждения админом
                         try:
@@ -977,6 +996,7 @@ def tg_webhook_impl():
                     actor_name,
                     {"source": "telegram_miniapp"},
                 )
+                sync_booking_state_to_core(conn, booking_id)
 
                 # Проверяем наличие TG_CHAT_ID
                 if not TG_CHAT_ID:
@@ -1124,7 +1144,7 @@ def tg_webhook_impl():
                         if mode == "assign_table":
                             table_number = normalize_table_number(text)
                             if not table_number:
-                                tg_send_message(chat_id, "Номер стола должен быть положительным целым числом.")
+                                tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
                                 return {"ok": True}
 
                             booking_row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
@@ -1232,7 +1252,7 @@ def tg_webhook_impl():
                         if mode in {"restrict_number", "manual_restrict_number"}:
                             table_number = normalize_table_number(text)
                             if not table_number:
-                                tg_send_message(chat_id, "Номер стола должен быть положительным целым числом.")
+                                tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
                                 return {"ok": True}
 
                             flow["table_number"] = table_number
@@ -1351,7 +1371,7 @@ def tg_webhook_impl():
                         if mode == "clear_restriction":
                             table_number = normalize_table_number(text)
                             if not table_number:
-                                tg_send_message(chat_id, "Номер стола должен быть положительным целым числом.")
+                                tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
                                 return {"ok": True}
 
                             result = set_table_label(conn, table_number, "NONE", actor_id, actor_name)
@@ -1462,6 +1482,47 @@ def tg_webhook_impl():
                             f"Причина: <code>{_h(msg)}</code>\n\n"
                             "Получите новый код в CRM и повторите попытку.",
                         )
+                    return {"ok": True}
+
+                if GUEST_COMM_ENABLED and len(parts) > 1 and parts[1].startswith(TG_BINDING_START_PREFIX):
+                    bind_token = parts[1].replace(TG_BINDING_START_PREFIX, "", 1).strip()
+                    if not bind_token:
+                        tg_send_message(chat_id, "Токен привязки не распознан. Вернитесь на страницу брони и попробуйте снова.")
+                        return {"ok": True}
+                    result = consume_binding_token_once(
+                        conn,
+                        token_plain=bind_token,
+                        channel_type="telegram",
+                        external_user_id=actor_id,
+                        profile_meta={
+                            "external_username": tg_username,
+                            "external_display_name": first_name,
+                        },
+                    )
+                    if result.get("ok"):
+                        send_service_notification(
+                            conn,
+                            event_type="CHANNEL_CONNECTED",
+                            text="Канал успешно подключён. Уведомления по этой и будущим броням будут приходить сюда.",
+                            reservation_id=int(result["reservation_id"]),
+                            force_channel="telegram",
+                        )
+                        conn.commit()
+                        tg_send_message(
+                            chat_id,
+                            "✅ Канал успешно подключён.\n\n"
+                            "Уведомления по этой и будущим броням будут приходить сюда.",
+                        )
+                    else:
+                        conn.rollback()
+                        err = str(result.get("error") or "token_invalid")
+                        if err == "token_expired":
+                            text_err = "Ссылка устарела. Вернитесь на страницу брони и сформируйте новую."
+                        elif err == "token_used":
+                            text_err = "Этот токен уже использован. При необходимости сформируйте новую ссылку."
+                        else:
+                            text_err = "Не удалось привязать канал. Вернитесь на страницу брони и попробуйте снова."
+                        tg_send_message(chat_id, f"❌ {text_err}")
                     return {"ok": True}
 
                 if len(parts) > 1 and parts[1].startswith("promo_"):

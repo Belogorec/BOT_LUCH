@@ -1,16 +1,22 @@
 import re
 import hashlib
 import hmac
+from datetime import datetime
 
 import json
 import urllib.parse
 
 from flask import Flask, request
 
+from contact_schema import run_contact_schema_migrations
+from core_sync import sync_booking_state_to_core, sync_booking_to_core
+from core_schema import run_core_schema_migrations
 from dashboard_api import (
     admin_api_segments_impl,
     admin_api_load_impl,
 )
+from integration_schema import run_integration_schema_migrations
+from integration_service import create_outbox_message, link_message_to_reservation
 from config import BOT_TOKEN, find_vk_bot_config_by_group_id
 from db import connect, run_migrations, seed_discount_codes_from_csv
 from local_log import log_event, log_exception
@@ -148,6 +154,7 @@ def _crm_set_booking_status(conn, booking_id: int, status: str, actor_id: str, a
     log_booking_event(conn, booking_id, event_type, actor_id, actor_name, {"source": "crm"})
     if normalized == "CONFIRMED":
         ensure_visit_from_confirmed_booking(conn, booking_id, actor_id, actor_name)
+    sync_booking_state_to_core(conn, booking_id)
 
 
 def validate_telegram_init_data(init_data_str: str) -> tuple[bool, dict]:
@@ -190,6 +197,9 @@ def bootstrap_schema():
   conn = connect()
   try:
     run_migrations(conn)
+    run_core_schema_migrations(conn)
+    run_integration_schema_migrations(conn)
+    run_contact_schema_migrations(conn)
     seed_discount_codes_from_csv(conn)
     conn.commit()
   finally:
@@ -238,6 +248,7 @@ def crm_sync_booking(booking_id: int):
                 (reservation_date, reservation_time, f"{reservation_date}T{reservation_time}", booking_id),
             )
             log_booking_event(conn, booking_id, "RESCHEDULED", actor_id, actor_name, {"source": "crm"})
+            sync_booking_state_to_core(conn, booking_id)
         elif action == "update_guests":
             try:
                 guests_count = int(str(data.get("guests_count") or "").strip())
@@ -248,6 +259,7 @@ def crm_sync_booking(booking_id: int):
                 (guests_count, booking_id),
             )
             log_booking_event(conn, booking_id, "GUESTS_UPDATED", actor_id, actor_name, {"source": "crm"})
+            sync_booking_state_to_core(conn, booking_id)
         elif action == "assign_table":
             table_number = normalize_table_number(data.get("table_number"))
             if not table_number:
@@ -366,6 +378,125 @@ def crm_sync_recent_bookings():
         ]
         return {"ok": True, "items": items, "count": len(items)}, 200
     except Exception as exc:
+        return {"ok": False, "error": str(exc)}, 500
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/crm-sync/manual-booking", methods=["POST"])
+def crm_sync_manual_booking():
+    if not _crm_sync_authorized(request):
+        return {"ok": False, "error": "forbidden"}, 403
+
+    payload = request.get_json(silent=True) or {}
+    data = payload.get("payload") or {}
+    actor_id = str(payload.get("actor_tg_id") or "crm")
+    actor_name = str(payload.get("actor_name") or "crm")
+
+    guest_name = str(data.get("guest_name") or "").strip() or "CRM"
+    guest_phone = str(data.get("guest_phone") or "").strip() or None
+    reservation_date = str(data.get("reservation_date") or "").strip()
+    reservation_time = normalize_time_hhmm(data.get("reservation_time") or "")
+    comment = str(data.get("table_comment") or data.get("comment") or "").strip()
+    table_number = normalize_table_number(data.get("table_number"))
+    session_mode = str(data.get("session_mode") or "").strip().lower()
+
+    try:
+        guests_count = int(str(data.get("guests_count") or "").strip())
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid_guests_count"}, 400
+    if guests_count <= 0:
+        return {"ok": False, "error": "invalid_guests_count"}, 400
+
+    if not reservation_date:
+        reservation_date = datetime.utcnow().strftime("%Y-%m-%d")
+    if not reservation_time:
+        reservation_time = datetime.utcnow().strftime("%H:%M")
+
+    conn = connect()
+    should_notify_waiters = False
+    try:
+        raw_payload = json.dumps(
+            {
+                "source": "crm_manual",
+                "session_mode": session_mode,
+                "guest_name": guest_name,
+                "guest_phone": guest_phone,
+                "guests_count": guests_count,
+                "table_number": table_number,
+                "comment": comment,
+            },
+            ensure_ascii=False,
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO bookings
+            (
+              tranid, formname, name, phone_e164, phone_raw, user_chat_id,
+              reservation_date, reservation_time, reservation_dt,
+              guests_count, comment,
+              utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+              status, guest_segment, reservation_token, raw_payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?)
+            """,
+            (
+                None,
+                "crm_manual",
+                guest_name,
+                guest_phone,
+                guest_phone,
+                None,
+                reservation_date,
+                reservation_time,
+                f"{reservation_date}T{reservation_time}",
+                guests_count,
+                comment or None,
+                "crm",
+                "manual",
+                None,
+                None,
+                None,
+                "manual",
+                None,
+                raw_payload,
+            ),
+        )
+        booking_id = int(cur.lastrowid)
+        log_booking_event(conn, booking_id, "CREATED", actor_id, actor_name, {"source": "crm_manual"})
+
+        if table_number:
+            assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name, force_override=True)
+
+        if session_mode == "deposit":
+            set_booking_deposit(
+                conn,
+                booking_id,
+                data.get("deposit_amount"),
+                actor_id,
+                actor_name,
+                comment=str(data.get("deposit_comment") or comment).strip(),
+            )
+            should_notify_waiters = True
+
+        sync_booking_state_to_core(conn, booking_id)
+        conn.commit()
+
+        try:
+            _refresh_admin_booking_card(conn, booking_id)
+        except Exception:
+            pass
+        if should_notify_waiters:
+            try:
+                notify_waiters_about_deposit_booking(conn, booking_id)
+            except Exception:
+                pass
+        return {"ok": True, "booking_id": booking_id}, 200
+    except ValueError as exc:
+        conn.rollback()
+        return {"ok": False, "error": str(exc)}, 400
+    except Exception as exc:
+        conn.rollback()
         return {"ok": False, "error": str(exc)}, 500
     finally:
         conn.close()
@@ -1117,6 +1248,17 @@ def api_submit_booking():
     )
     booking_id = int(cur.lastrowid)
     log_booking_event(conn, booking_id, "CREATED", tg_user_id, "", {"source": "telegram_miniapp_api"})
+    sync_booking_state_to_core(conn, booking_id)
+    core_reservation_id = sync_booking_to_core(conn, booking_id)
+    create_outbox_message(
+      conn,
+      reservation_id=core_reservation_id,
+      platform="telegram",
+      bot_scope="hostess",
+      target_external_id=str(TG_CHAT_ID or "").strip() or None,
+      message_type="reservation_created",
+      payload={"legacy_booking_id": booking_id, "source": "telegram_miniapp_api"},
+    )
 
     if TG_CHAT_ID:
       card_text, kb = render_booking_card(conn, booking_id)
@@ -1126,6 +1268,14 @@ def api_submit_booking():
           conn.execute(
             "UPDATE bookings SET telegram_chat_id=?, telegram_message_id=?, updated_at=datetime('now') WHERE id=?",
             (str(TG_CHAT_ID), str(msg_id), booking_id),
+          )
+          link_message_to_reservation(
+            conn,
+            reservation_id=core_reservation_id,
+            platform="telegram",
+            bot_scope="hostess",
+            external_chat_id=str(TG_CHAT_ID),
+            external_message_id=str(msg_id),
           )
           log_booking_event(conn, booking_id, "TG_SYNC_OK", "system", "system", {"target_chat_id": str(TG_CHAT_ID)})
       except Exception as e:

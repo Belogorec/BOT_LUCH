@@ -1,8 +1,10 @@
 import json
 import re
+import secrets
 
 from flask import request, abort
 
+from core_sync import sync_booking_state_to_core, sync_booking_to_core
 from config import TILDA_SECRET, TG_CHAT_ID
 from telegram_api import tg_send_message, tg_edit_message
 from booking_service import (
@@ -14,6 +16,8 @@ from booking_render import render_booking_card
 from crm_sync import send_booking_event
 from db import connect, get_tags
 from vk_staff_notify import notify_vk_staff_about_new_booking
+from channel_binding_service import build_guest_page_public_url
+from integration_service import create_outbox_message, link_message_to_reservation
 
 
 def ensure_db():
@@ -154,6 +158,7 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
     conn = ensure_db()
     booking_id = None
     tg_status = "skipped"
+    reservation_token = ""
 
     try:
         if phone_e164:
@@ -176,6 +181,10 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
 
         if existing:
             booking_id = int(existing["id"])
+            existing_token_row = conn.execute("SELECT reservation_token FROM bookings WHERE id=?", (booking_id,)).fetchone()
+            reservation_token = str(existing_token_row["reservation_token"] or "").strip() if existing_token_row else ""
+            if not reservation_token:
+                reservation_token = secrets.token_urlsafe(24)
             conn.execute(
                 """
                 UPDATE bookings
@@ -194,6 +203,7 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
                     utm_term=?,
                     formname=?,
                     guest_segment=?,
+                    reservation_token=?,
                     raw_payload_json=?,
                     updated_at=datetime('now')
                 WHERE id=?
@@ -214,6 +224,7 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
                     utm_term,
                     formname,
                     guest_segment,
+                    reservation_token,
                     json.dumps(payload, ensure_ascii=False),
                     booking_id,
                 ),
@@ -226,15 +237,16 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
                 "system",
                 {"source": "tilda"},
             )
+            sync_booking_state_to_core(conn, booking_id)
         else:
             cur = conn.execute(
                 """
                 INSERT INTO bookings
                   (tranid, formname, name, phone_e164, phone_raw, reservation_date, reservation_time, reservation_dt,
                    guests_count, comment, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-                   status, guest_segment, raw_payload_json)
+                   status, guest_segment, reservation_token, raw_payload_json)
                 VALUES
-                  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?)
+                  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
                 """,
                 (
                     tranid or None,
@@ -253,11 +265,26 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
                     utm_content,
                     utm_term,
                     guest_segment,
+                    reservation_token or secrets.token_urlsafe(24),
                     json.dumps(payload, ensure_ascii=False),
                 ),
             )
             booking_id = int(cur.lastrowid)
+            if not reservation_token:
+                row = conn.execute("SELECT reservation_token FROM bookings WHERE id=?", (booking_id,)).fetchone()
+                reservation_token = str(row["reservation_token"] or "").strip() if row else ""
             log_booking_event(conn, booking_id, "CREATED", "system", "system", {"source": "tilda"})
+            sync_booking_state_to_core(conn, booking_id)
+        core_reservation_id = sync_booking_to_core(conn, booking_id)
+        create_outbox_message(
+            conn,
+            reservation_id=core_reservation_id,
+            platform="telegram",
+            bot_scope="hostess",
+            target_external_id=str(TG_CHAT_ID or "").strip() or None,
+            message_type="reservation_created",
+            payload={"legacy_booking_id": booking_id, "source": "tilda"},
+        )
 
         conn.commit()
 
@@ -302,6 +329,14 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
                 conn.execute(
                     "UPDATE bookings SET telegram_chat_id=?, telegram_message_id=?, updated_at=datetime('now') WHERE id=?",
                     (str(TG_CHAT_ID), str(msg_id), booking_id),
+                )
+                link_message_to_reservation(
+                    conn,
+                    reservation_id=core_reservation_id,
+                    platform="telegram",
+                    bot_scope="hostess",
+                    external_chat_id=str(TG_CHAT_ID),
+                    external_message_id=str(msg_id),
                 )
                 tg_status = "sent"
 
@@ -353,7 +388,12 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
             )
             conn.commit()
 
-        return {"ok": True, "booking_id": booking_id, "tg_status": tg_status}
+        return {
+            "ok": True,
+            "booking_id": booking_id,
+            "tg_status": tg_status,
+            "guest_page_url": build_guest_page_public_url(reservation_token),
+        }
 
     finally:
         conn.close()
