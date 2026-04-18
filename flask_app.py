@@ -9,7 +9,7 @@ import urllib.parse
 from flask import Flask, request
 
 from contact_schema import run_contact_schema_migrations
-from core_sync import sync_booking_state_to_core, sync_booking_to_core
+from core_sync import sync_booking_state_to_core, sync_booking_to_core, migrate_all_tables_to_core
 from core_schema import run_core_schema_migrations
 from dashboard_api import (
     admin_api_segments_impl,
@@ -201,6 +201,7 @@ def bootstrap_schema():
     run_integration_schema_migrations(conn)
     run_contact_schema_migrations(conn)
     seed_discount_codes_from_csv(conn)
+    migrate_all_tables_to_core(conn)
     conn.commit()
   finally:
     conn.close()

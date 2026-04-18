@@ -261,3 +261,26 @@ def sync_booking_state_to_core(conn: sqlite3.Connection, booking_id: int) -> Non
 
 def sync_table_state_to_core(conn: sqlite3.Connection, table_number: str) -> None:
     sync_table_to_core(conn, table_number)
+
+
+def migrate_all_tables_to_core(conn: sqlite3.Connection) -> int:
+    """Migrate all venue_tables to tables_core (idempotent)."""
+    venue_tables = conn.execute(
+        """
+        SELECT DISTINCT table_number, label
+        FROM venue_tables
+        WHERE table_number IS NOT NULL AND trim(table_number) <> ''
+        """
+    ).fetchall()
+
+    migrated = 0
+    for row in venue_tables:
+        table_number = str(row["table_number"]).strip()
+        if not table_number:
+            continue
+
+        table_id = _ensure_table(conn, table_number)
+        sync_table_to_core(conn, table_number)
+        migrated += 1
+
+    return migrated
