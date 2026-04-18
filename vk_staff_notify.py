@@ -1,5 +1,6 @@
 from typing import Any, Optional
 
+from config import VK_HOSTESS_PEER_IDS, VK_WAITER_PEER_IDS
 from local_log import log_event, log_exception
 from vk_api import vk_api_enabled, vk_send_message
 from vk_staff_flow import build_vk_booking_keyboard, render_vk_booking_message
@@ -79,6 +80,26 @@ def fetch_active_vk_staff_peers(conn, *, bot_key: str) -> list[dict[str, Any]]:
             continue
         seen_peer_ids.add(peer_id)
         deduped.append(dict(row))
+
+    fallback_ids = VK_HOSTESS_PEER_IDS if str(bot_key or "").strip() == "hostess" else VK_WAITER_PEER_IDS
+    for peer_id in fallback_ids:
+        normalized = str(peer_id or "").strip()
+        if not normalized or normalized in seen_peer_ids:
+            continue
+        seen_peer_ids.add(normalized)
+        deduped.append(
+            {
+                "peer_id": normalized,
+                "from_id": "",
+                "is_active": 1,
+                "role_hint": str(bot_key or "").strip() or "hostess",
+                "bot_key": str(bot_key or "").strip() or "hostess",
+                "last_message_text": "",
+                "last_seen_at": "",
+                "created_at": "",
+                "updated_at": "",
+            }
+        )
     return deduped
 
 

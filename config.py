@@ -44,6 +44,13 @@ def _parse_admin_ids(raw: str) -> list[str]:
     return sorted(set(normalized))
 
 
+def _parse_peer_ids(raw: str) -> list[str]:
+    if not raw:
+        return []
+    parts = [p.strip().strip('"').strip("'").strip() for p in re.split(r"[\s,;]+", str(raw)) if p.strip()]
+    return [p for p in parts if p]
+
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
 WAITER_CHAT_ID = os.getenv("WAITER_CHAT_ID", os.getenv("WAITERS_CHAT_ID", "-1001763474308")).strip()
@@ -64,11 +71,13 @@ VK_HOSTESS_GROUP_ID = os.getenv("VK_HOSTESS_GROUP_ID", os.getenv("VK_GROUP_ID", 
 VK_HOSTESS_ACCESS_TOKEN = os.getenv("VK_HOSTESS_ACCESS_TOKEN", os.getenv("VK_ACCESS_TOKEN", "")).strip()
 VK_HOSTESS_CALLBACK_SECRET = os.getenv("VK_HOSTESS_CALLBACK_SECRET", os.getenv("VK_CALLBACK_SECRET", "")).strip()
 VK_HOSTESS_CONFIRMATION_TOKEN = os.getenv("VK_HOSTESS_CONFIRMATION_TOKEN", os.getenv("VK_CONFIRMATION_TOKEN", "")).strip()
+VK_HOSTESS_PEER_IDS = _parse_peer_ids(os.getenv("VK_HOSTESS_PEER_IDS", ""))
 
 VK_WAITER_GROUP_ID = os.getenv("VK_WAITER_GROUP_ID", "").strip()
 VK_WAITER_ACCESS_TOKEN = os.getenv("VK_WAITER_ACCESS_TOKEN", "").strip()
 VK_WAITER_CALLBACK_SECRET = os.getenv("VK_WAITER_CALLBACK_SECRET", "").strip()
 VK_WAITER_CONFIRMATION_TOKEN = os.getenv("VK_WAITER_CONFIRMATION_TOKEN", "").strip()
+VK_WAITER_PEER_IDS = _parse_peer_ids(os.getenv("VK_WAITER_PEER_IDS", ""))
 VK_GUEST_GROUP_ID = os.getenv("VK_GUEST_GROUP_ID", "").strip()
 VK_GUEST_ACCESS_TOKEN = os.getenv("VK_GUEST_ACCESS_TOKEN", "").strip()
 VK_GUEST_CALLBACK_SECRET = os.getenv("VK_GUEST_CALLBACK_SECRET", "").strip()
