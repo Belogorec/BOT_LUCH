@@ -143,7 +143,7 @@ def sync_booking_to_core(conn: sqlite3.Connection, booking_id: int) -> int:
               updated_at,
               source,
               external_ref
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             params,
         )
