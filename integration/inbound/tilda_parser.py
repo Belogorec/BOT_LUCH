@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Callable
+
+
+DATE_ONLY_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%Y")
 
 
 def _normalize_payload_key(value: Any) -> str:
     normalized = str(value or "").strip().lower().replace("ё", "е")
     return re.sub(r"[^0-9a-zа-я]+", "", normalized)
+
+
+def _normalize_date_iso(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    for fmt in DATE_ONLY_FORMATS:
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return raw
 
 
 def parse_tilda_booking_payload(
@@ -61,12 +77,14 @@ def parse_tilda_booking_payload(
     )
     phone_e164 = normalize_phone_e164(phone_raw, default_region="RU")
 
-    date_raw = pick(
+    date_raw = _normalize_date_iso(
+        pick(
         "date", "Date", "DATE",
         "reservation_date", "Reservation date",
         "Дата", "дата",
         default="",
-    ).strip()
+        ).strip()
+    )
 
     time_raw_src = pick(
         "time", "Time", "TIME",

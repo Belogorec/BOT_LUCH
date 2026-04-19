@@ -82,6 +82,18 @@ class TildaParserTests(unittest.TestCase):
         self.assertEqual(parsed["comment"], "день рождения")
         self.assertEqual(parsed["utm_source"], "ads")
 
+    def test_tilda_parser_normalizes_dash_date_to_iso(self):
+        parsed = self._parse(
+            {
+                "Name": "Test",
+                "Phone": "+7 (999) 000-00-00",
+                "date": "20-04-2026",
+                "time": "22:22",
+            }
+        )
+        self.assertEqual(parsed["date_raw"], "2026-04-20")
+        self.assertEqual(parsed["time_raw"], "22:22")
+
     def test_invalid_inputs_keep_safe_defaults(self):
         parsed = self._parse(
             {
@@ -102,4 +114,3 @@ class TildaParserTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

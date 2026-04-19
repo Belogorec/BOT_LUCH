@@ -359,6 +359,8 @@ def load_booking_read_model(conn, booking_id: int) -> Optional[dict]:
         "utm_campaign": None,
         "utm_content": None,
         "utm_term": None,
+        "created_at": None,
+        "updated_at": None,
     }
 
     if core_row:
