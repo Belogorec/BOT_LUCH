@@ -346,16 +346,23 @@ def crm_sync_recent_bookings():
             FROM reservations
             WHERE source='legacy_booking'
               AND COALESCE(status, 'pending') NOT IN ('declined', 'cancelled', 'no_show', 'completed')
-              AND (
-                    datetime(updated_at) >= datetime('now', ?)
-                    OR datetime(replace(reservation_at, 'T', ' ')) >= datetime('now', ?)
-                  )
               AND external_ref IS NOT NULL
               AND trim(external_ref) <> ''
-            ORDER BY datetime(updated_at) DESC, id DESC
+              AND (
+                    datetime(replace(reservation_at, 'T', ' ')) >= datetime('now', '-1 day')
+                    OR datetime(updated_at) >= datetime('now', ?)
+                  )
+            ORDER BY
+              CASE
+                WHEN trim(COALESCE(reservation_at, '')) <> '' THEN 0
+                ELSE 1
+              END ASC,
+              datetime(replace(COALESCE(reservation_at, ''), 'T', ' ')) ASC,
+              datetime(updated_at) DESC,
+              id DESC
             LIMIT ?
             """,
-            (f"-{int(days)} days", f"-{int(days)} days", int(limit)),
+            (f"-{int(days)} days", int(limit)),
         ).fetchall()
 
         items = [
