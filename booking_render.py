@@ -1,7 +1,7 @@
 import html
 from datetime import datetime
 
-from booking_service import compute_segment, get_guest_summary
+from booking_service import compute_segment, get_guest_summary, load_booking_read_model
 
 
 def _h(s: str) -> str:
@@ -15,7 +15,7 @@ def render_booking_card(conn, booking_id: int) -> tuple[str, dict]:
     количество визитов, комментарий к брони, заметки о госте.
     Кнопки: Подтвердить, Отменить, Комментарий к гостю, История визитов.
     """
-    b = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+    b = load_booking_read_model(conn, booking_id)
     if not b:
         return ("Бронь не найдена.", {"inline_keyboard": []})
 

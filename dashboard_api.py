@@ -177,27 +177,15 @@ def admin_api_load_impl(period: str):
     try:
         fmt = "%Y-%m-%d" if gran == "day" else "%Y-%m-%d %H:00"
 
-        be_cols = []
-        try:
-            be_cols = [r["name"] for r in conn.execute("PRAGMA table_info(booking_events)").fetchall()]
-        except Exception:
-            be_cols = []
-
-        be_created_col = "created_at"
-        for cand in ("created_at", "created_dt", "created_ts"):
-            if cand in be_cols:
-                be_created_col = cand
-                break
-
         created_rows = conn.execute(
-            f"""
+            """
             SELECT
-              strftime(?, datetime(be.{be_created_col}, ?)) AS b,
+              strftime(?, datetime(re.created_at, ?)) AS b,
               COUNT(*) AS c
-            FROM booking_events be
-            WHERE be.event_type='CREATED'
-              AND datetime(be.{be_created_col}, ?) >= datetime(?)
-              AND datetime(be.{be_created_col}, ?) <  datetime(?)
+            FROM reservation_events re
+            WHERE re.event_type='CREATED'
+              AND datetime(re.created_at, ?) >= datetime(?)
+              AND datetime(re.created_at, ?) <  datetime(?)
             GROUP BY b
             ORDER BY b
             """,
@@ -207,12 +195,12 @@ def admin_api_load_impl(period: str):
         reserved_rows = conn.execute(
             """
             SELECT
-              strftime(?, datetime(replace(reservation_dt, 'T', ' '))) AS b,
+              strftime(?, datetime(replace(r.reservation_at, 'T', ' '))) AS b,
               COUNT(*) AS c
-            FROM bookings
-            WHERE reservation_dt IS NOT NULL AND trim(reservation_dt) <> ''
-              AND datetime(replace(reservation_dt, 'T', ' ')) >= datetime(?)
-              AND datetime(replace(reservation_dt, 'T', ' ')) <  datetime(?)
+            FROM reservations r
+            WHERE r.reservation_at IS NOT NULL AND trim(r.reservation_at) <> ''
+              AND datetime(replace(r.reservation_at, 'T', ' ')) >= datetime(?)
+              AND datetime(replace(r.reservation_at, 'T', ' ')) <  datetime(?)
             GROUP BY b
             ORDER BY b
             """,
@@ -225,12 +213,12 @@ def admin_api_load_impl(period: str):
         hours = [f"{h:02d}" for h in range(24)]
 
         created_hour_rows = conn.execute(
-            f"""
-            SELECT strftime('%H', datetime(be.{be_created_col}, ?)) AS h, COUNT(*) AS c
-            FROM booking_events be
-            WHERE be.event_type='CREATED'
-              AND datetime(be.{be_created_col}, ?) >= datetime(?)
-              AND datetime(be.{be_created_col}, ?) <  datetime(?)
+            """
+            SELECT strftime('%H', datetime(re.created_at, ?)) AS h, COUNT(*) AS c
+            FROM reservation_events re
+            WHERE re.event_type='CREATED'
+              AND datetime(re.created_at, ?) >= datetime(?)
+              AND datetime(re.created_at, ?) <  datetime(?)
             GROUP BY h
             ORDER BY h
             """,
@@ -239,11 +227,11 @@ def admin_api_load_impl(period: str):
 
         reserved_hour_rows = conn.execute(
             """
-            SELECT strftime('%H', datetime(replace(reservation_dt, 'T', ' '))) AS h, COUNT(*) AS c
-            FROM bookings
-            WHERE reservation_dt IS NOT NULL AND trim(reservation_dt) <> ''
-              AND datetime(replace(reservation_dt, 'T', ' ')) >= datetime(?)
-              AND datetime(replace(reservation_dt, 'T', ' ')) <  datetime(?)
+            SELECT strftime('%H', datetime(replace(r.reservation_at, 'T', ' '))) AS h, COUNT(*) AS c
+            FROM reservations r
+            WHERE r.reservation_at IS NOT NULL AND trim(r.reservation_at) <> ''
+              AND datetime(replace(r.reservation_at, 'T', ' ')) >= datetime(?)
+              AND datetime(replace(r.reservation_at, 'T', ' ')) <  datetime(?)
             GROUP BY h
             ORDER BY h
             """,

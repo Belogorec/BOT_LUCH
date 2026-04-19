@@ -2,17 +2,17 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from core_sync import sync_booking_state_to_core, sync_booking_to_core
+from core_sync import sync_booking_to_core
 from booking_service import (
     assign_table_to_booking,
     clear_booking_deposit,
     clear_table_assignment,
-    ensure_visit_from_confirmed_booking,
     get_table_assignment_conflicts,
-    log_booking_event,
+    load_booking_read_model,
     mark_booking_cancelled,
     normalize_table_number,
     parse_restriction_until,
+    set_booking_status,
     set_booking_deposit,
     set_table_label,
 )
@@ -91,17 +91,7 @@ def build_vk_booking_keyboard(booking_id: int) -> dict[str, Any]:
 
 
 def render_vk_booking_message(conn, booking_id: int) -> str:
-    row = conn.execute(
-        """
-        SELECT
-            id, status, formname, name, phone_e164, phone_raw,
-            reservation_date, reservation_time, guests_count, comment,
-            assigned_table_number, deposit_amount, deposit_comment
-        FROM bookings
-        WHERE id = ?
-        """,
-        (int(booking_id),),
-    ).fetchone()
+    row = load_booking_read_model(conn, booking_id)
     if not row:
         return "Бронь не найдена."
 
@@ -224,10 +214,7 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
             peer_external_id=str(peer or ""),
             reservation_id=core_reservation_id,
         )
-        conn.execute("UPDATE bookings SET status='CONFIRMED', updated_at=datetime('now') WHERE id=?", (booking_id,))
-        log_booking_event(conn, booking_id, "CONFIRMED", actor_id, actor_name, {"source": "vk_staff"})
-        ensure_visit_from_confirmed_booking(conn, booking_id, actor_id, actor_name)
-        sync_booking_state_to_core(conn, booking_id)
+        set_booking_status(conn, booking_id, "CONFIRMED", actor_id, actor_name, source="vk_staff")
         try:
             send_booking_event(conn, booking_id, "BOOKING_CONFIRMED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"source": "vk_staff"}})
         except Exception:
@@ -273,7 +260,7 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
         return True
 
     if action == "prompt_restrict_table":
-        booking_row = conn.execute("SELECT assigned_table_number FROM bookings WHERE id=?", (booking_id,)).fetchone()
+        booking_row = load_booking_read_model(conn, booking_id)
         table_number = normalize_table_number(booking_row["assigned_table_number"] if booking_row else None)
         if not table_number:
             _save_vk_pending_action(conn, peer_id=peer_id, from_id=from_id, booking_id=booking_id, mode="restrict_table_number")
@@ -313,7 +300,7 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
         if not table_number:
             vk_send_message(peer, "Номер стола должен быть корректным. Например: 221 или 221.1.")
             return True
-        booking_row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+        booking_row = load_booking_read_model(conn, booking_id)
         if not booking_row:
             _clear_vk_pending_action(conn, pending_row["id"])
             vk_send_message(peer, "Бронь не найдена.")
@@ -350,7 +337,7 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
             notify_waiters_about_deposit_booking(conn, booking_id)
         except Exception:
             pass
-        booking_state = conn.execute("SELECT assigned_table_number FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+        booking_state = load_booking_read_model(conn, booking_id)
         if booking_state and not booking_state["assigned_table_number"]:
             _save_vk_pending_action(conn, peer_id=peer_id, from_id=from_id, booking_id=booking_id, mode="assign_table")
             vk_send_message(peer, f"Депозит {result['deposit_amount']} сохранён для брони #{booking_id}.\nТеперь напиши номер стола, чтобы информация ушла официантам.")

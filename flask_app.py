@@ -8,35 +8,38 @@ import urllib.parse
 
 from flask import Flask, request
 
+from application import execute_telegram_miniapp_booking
 from contact_schema import run_contact_schema_migrations
-from core_sync import sync_booking_state_to_core, sync_booking_to_core, migrate_all_tables_to_core
+from core_sync import migrate_all_tables_to_core
 from core_schema import run_core_schema_migrations
 from dashboard_api import (
     admin_api_segments_impl,
     admin_api_load_impl,
 )
 from integration_schema import run_integration_schema_migrations
-from integration_service import create_outbox_message, link_message_to_reservation
 from config import BOT_TOKEN, find_vk_bot_config_by_group_id
 from db import connect, run_migrations, seed_discount_codes_from_csv
 from local_log import log_event, log_exception
+from hostess_card_delivery import get_hostess_card_link
 from tg_handlers import tg_webhook_impl
 from tilda_api import tilda_webhook_impl
 from telegram_api import tg_edit_message
 from vk_api import vk_answer_message_event, vk_api_enabled, vk_send_message
 from vk_staff_flow import parse_vk_event_payload, parse_vk_message_payload, process_vk_booking_payload, process_vk_pending_text
-from vk_staff_notify import notify_vk_staff_about_new_booking, upsert_vk_staff_peer
+from vk_staff_notify import upsert_vk_staff_peer
 from booking_render import render_booking_card
 from booking_service import (
     assign_table_to_booking,
     clear_booking_deposit,
     clear_table_assignment,
-    ensure_visit_from_confirmed_booking,
-    log_booking_event,
-    mark_booking_cancelled,
+    create_manual_booking,
+    load_booking_read_model,
     normalize_table_number,
+    reschedule_booking,
+    set_booking_status,
     set_booking_deposit,
     set_table_label,
+    update_booking_guests_count,
 )
 from waiter_notify import notify_waiters_about_deposit_booking
 
@@ -124,37 +127,26 @@ def _resolve_vk_callback_bot(payload: dict, *, require_secret: bool = True) -> d
 
 
 def _refresh_admin_booking_card(conn, booking_id: int) -> None:
-    row = conn.execute(
-        "SELECT telegram_chat_id, telegram_message_id FROM bookings WHERE id=?",
-        (booking_id,),
+    reservation_row = conn.execute(
+        """
+        SELECT id
+        FROM reservations
+        WHERE source='legacy_booking' AND external_ref=?
+        LIMIT 1
+        """,
+        (str(int(booking_id)),),
     ).fetchone()
-    if not row or not row["telegram_chat_id"] or not row["telegram_message_id"]:
+    if not reservation_row:
+        return
+    link = get_hostess_card_link(conn, reservation_id=int(reservation_row["id"]))
+    if not link or not link["chat_id"] or not link["message_id"]:
         return
     text, kb = render_booking_card(conn, booking_id)
-    tg_edit_message(str(row["telegram_chat_id"]), str(row["telegram_message_id"]), text, kb)
+    tg_edit_message(link["chat_id"], link["message_id"], text, kb)
 
 
 def _crm_set_booking_status(conn, booking_id: int, status: str, actor_id: str, actor_name: str) -> None:
-    normalized = str(status or "").strip().upper()
-    if normalized == "CANCELLED":
-        mark_booking_cancelled(conn, booking_id, actor_id, actor_name)
-        return
-
-    event_type = {
-        "CONFIRMED": "CONFIRMED",
-        "DECLINED": "DECLINED",
-        "NO_SHOW": "NO_SHOW",
-        "COMPLETED": "COMPLETED",
-        "WAITING": "WAITING",
-    }.get(normalized, "STATUS_CHANGED")
-    conn.execute(
-        "UPDATE bookings SET status=?, updated_at=datetime('now') WHERE id=?",
-        (normalized, booking_id),
-    )
-    log_booking_event(conn, booking_id, event_type, actor_id, actor_name, {"source": "crm"})
-    if normalized == "CONFIRMED":
-        ensure_visit_from_confirmed_booking(conn, booking_id, actor_id, actor_name)
-    sync_booking_state_to_core(conn, booking_id)
+    set_booking_status(conn, booking_id, status, actor_id, actor_name, source="crm")
 
 
 def validate_telegram_init_data(init_data_str: str) -> tuple[bool, dict]:
@@ -221,8 +213,8 @@ def crm_sync_booking(booking_id: int):
     conn = connect()
     should_notify_waiters = False
     try:
-        exists = conn.execute("SELECT id FROM bookings WHERE id=?", (booking_id,)).fetchone()
-        if not exists:
+        booking = load_booking_read_model(conn, booking_id)
+        if not booking:
             return {"ok": False, "error": "booking_not_found"}, 404
 
         if action == "confirm":
@@ -238,29 +230,24 @@ def crm_sync_booking(booking_id: int):
         elif action == "reschedule":
             reservation_date = str(data.get("reservation_date") or "").strip()
             reservation_time = normalize_time_hhmm(data.get("reservation_time") or "")
-            if not (reservation_date and reservation_time):
-                return {"ok": False, "error": "reservation_date_and_time_required"}, 400
-            conn.execute(
-                """
-                UPDATE bookings
-                SET reservation_date=?, reservation_time=?, reservation_dt=?, updated_at=datetime('now')
-                WHERE id=?
-                """,
-                (reservation_date, reservation_time, f"{reservation_date}T{reservation_time}", booking_id),
+            reschedule_booking(
+                conn,
+                booking_id,
+                reservation_date,
+                reservation_time,
+                actor_id,
+                actor_name,
+                source="crm",
             )
-            log_booking_event(conn, booking_id, "RESCHEDULED", actor_id, actor_name, {"source": "crm"})
-            sync_booking_state_to_core(conn, booking_id)
         elif action == "update_guests":
-            try:
-                guests_count = int(str(data.get("guests_count") or "").strip())
-            except (TypeError, ValueError):
-                return {"ok": False, "error": "invalid_guests_count"}, 400
-            conn.execute(
-                "UPDATE bookings SET guests_count=?, updated_at=datetime('now') WHERE id=?",
-                (guests_count, booking_id),
+            update_booking_guests_count(
+                conn,
+                booking_id,
+                data.get("guests_count"),
+                actor_id,
+                actor_name,
+                source="crm",
             )
-            log_booking_event(conn, booking_id, "GUESTS_UPDATED", actor_id, actor_name, {"source": "crm"})
-            sync_booking_state_to_core(conn, booking_id)
         elif action == "assign_table":
             table_number = normalize_table_number(data.get("table_number"))
             if not table_number:
@@ -279,8 +266,7 @@ def crm_sync_booking(booking_id: int):
         elif action == "restrict_table":
             table_number = normalize_table_number(data.get("table_number"))
             if not table_number:
-                current = conn.execute("SELECT assigned_table_number FROM bookings WHERE id=?", (booking_id,)).fetchone()
-                table_number = normalize_table_number(current["assigned_table_number"] if current else None)
+                table_number = normalize_table_number(booking.get("assigned_table_number"))
             if not table_number:
                 return {"ok": False, "error": "invalid_table_number"}, 400
             set_table_label(
@@ -295,8 +281,7 @@ def crm_sync_booking(booking_id: int):
                 force_override=str(data.get("force_override") or "").strip() == "1",
             )
         elif action == "clear_table_restriction":
-            current = conn.execute("SELECT assigned_table_number FROM bookings WHERE id=?", (booking_id,)).fetchone()
-            table_number = normalize_table_number(data.get("table_number") or (current["assigned_table_number"] if current else None))
+            table_number = normalize_table_number(data.get("table_number") or booking.get("assigned_table_number"))
             if not table_number:
                 return {"ok": False, "error": "invalid_table_number"}, 400
             set_table_label(conn, table_number, "NONE", actor_id, actor_name, booking_id=booking_id)
@@ -357,11 +342,13 @@ def crm_sync_recent_bookings():
 
         rows = conn.execute(
             """
-            SELECT id
-            FROM bookings
-            WHERE COALESCE(formname, '') != 'manual_table'
-              AND COALESCE(status, 'WAITING') NOT IN ('DECLINED', 'CANCELLED', 'NO_SHOW', 'COMPLETED')
+            SELECT external_ref
+            FROM reservations
+            WHERE source='legacy_booking'
+              AND COALESCE(status, 'pending') NOT IN ('declined', 'cancelled', 'no_show', 'completed')
               AND datetime(created_at) >= datetime('now', ?)
+              AND external_ref IS NOT NULL
+              AND trim(external_ref) <> ''
             ORDER BY datetime(updated_at) DESC, id DESC
             LIMIT ?
             """,
@@ -371,11 +358,12 @@ def crm_sync_recent_bookings():
         items = [
             build_booking_sync_payload(
                 conn,
-                int(row["id"]),
+                int(row["external_ref"]),
                 "BOOKING_UPSERT",
                 {"actor_tg_id": "system", "actor_name": "recent_pull", "payload": {"source": "recent_pull"}},
             )
             for row in rows
+            if str(row["external_ref"]).strip().isdigit()
         ]
         return {"ok": True, "items": items, "count": len(items)}, 200
     except Exception as exc:
@@ -415,79 +403,30 @@ def crm_sync_manual_booking():
         reservation_time = datetime.utcnow().strftime("%H:%M")
 
     conn = connect()
-    should_notify_waiters = False
     try:
-        raw_payload = json.dumps(
-            {
-                "source": "crm_manual",
-                "session_mode": session_mode,
-                "guest_name": guest_name,
-                "guest_phone": guest_phone,
-                "guests_count": guests_count,
-                "table_number": table_number,
-                "comment": comment,
-            },
-            ensure_ascii=False,
+        result = create_manual_booking(
+            conn,
+            guest_name=guest_name,
+            guest_phone=guest_phone,
+            reservation_date=reservation_date,
+            reservation_time=reservation_time,
+            guests_count=guests_count,
+            comment=comment,
+            actor_id=actor_id,
+            actor_name=actor_name,
+            table_number=table_number,
+            session_mode=session_mode,
+            deposit_amount=data.get("deposit_amount"),
+            deposit_comment=str(data.get("deposit_comment") or "").strip(),
         )
-        cur = conn.execute(
-            """
-            INSERT INTO bookings
-            (
-              tranid, formname, name, phone_e164, phone_raw, user_chat_id,
-              reservation_date, reservation_time, reservation_dt,
-              guests_count, comment,
-              utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-              status, guest_segment, reservation_token, raw_payload_json
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?)
-            """,
-            (
-                None,
-                "crm_manual",
-                guest_name,
-                guest_phone,
-                guest_phone,
-                None,
-                reservation_date,
-                reservation_time,
-                f"{reservation_date}T{reservation_time}",
-                guests_count,
-                comment or None,
-                "crm",
-                "manual",
-                None,
-                None,
-                None,
-                "manual",
-                None,
-                raw_payload,
-            ),
-        )
-        booking_id = int(cur.lastrowid)
-        log_booking_event(conn, booking_id, "CREATED", actor_id, actor_name, {"source": "crm_manual"})
-
-        if table_number:
-            assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name, force_override=True)
-
-        if session_mode == "deposit":
-            set_booking_deposit(
-                conn,
-                booking_id,
-                data.get("deposit_amount"),
-                actor_id,
-                actor_name,
-                comment=str(data.get("deposit_comment") or comment).strip(),
-            )
-            should_notify_waiters = True
-
-        sync_booking_state_to_core(conn, booking_id)
+        booking_id = int(result["booking_id"])
         conn.commit()
 
         try:
             _refresh_admin_booking_card(conn, booking_id)
         except Exception:
             pass
-        if should_notify_waiters:
+        if result.get("notify_waiters"):
             try:
                 notify_waiters_about_deposit_booking(conn, booking_id)
             except Exception:
@@ -1181,133 +1120,20 @@ def api_submit_booking():
   if guests_count <= 0:
     return {"ok": False, "error": "Некорректное количество гостей"}, 400
 
-  from booking_service import log_booking_event
-  from booking_render import render_booking_card
-  from telegram_api import tg_send_message as _tg_send
-  from config import TG_CHAT_ID
-  from crm_sync import send_booking_event
-  from vk_staff_notify import notify_vk_staff_about_new_booking
-
   conn = ensure_db()
   try:
-    user_row = None
-    if tg_user_id:
-      user_row = conn.execute(
-        "SELECT phone_e164, first_name FROM tg_bot_users WHERE tg_user_id=? AND has_shared_phone=1",
-        (tg_user_id,),
-      ).fetchone()
-    phone_e164 = user_row["phone_e164"] if user_row else None
-    saved_name = (user_row["first_name"] if user_row else None) or ""
-
-    raw_payload = json.dumps({
-      "source": "telegram_miniapp_api",
-      "requester_tg_user_id": tg_user_id,
-      "requester_chat_id": tg_user_id,
-      "requester_name": saved_name,
-      "reservation_token": reservation_token,
-      "date": date_value,
-      "time": time_value,
-      "guests": guests_count,
-      "comment": comment_value,
-    }, ensure_ascii=False)
-
-    existing = conn.execute(
-      "SELECT id FROM bookings WHERE reservation_token=?",
-      (reservation_token,),
-    ).fetchone()
-    if existing:
-      existing_id = int(existing["id"])
-      return {"ok": True, "booking_id": existing_id, "duplicate": True}
-
-    cur = conn.execute(
-      """
-      INSERT INTO bookings
-      (tranid, formname, name, phone_e164, phone_raw, user_chat_id,
-       reservation_date, reservation_time, reservation_dt,
-       guests_count, comment,
-       utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-       status, guest_segment, reservation_token, raw_payload_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
-      """,
-      (
-        None,
-        "telegram_miniapp",
-        saved_name or "Telegram",
-        phone_e164,
-        phone_e164,
-        tg_user_id,
-        date_value,
-        time_value,
-        f"{date_value} {time_value}:00",
-        guests_count,
-        comment_value,
-        "telegram", "miniapp", None, None, None,
-        "NEW",
-        reservation_token,
-        raw_payload,
-      ),
-    )
-    booking_id = int(cur.lastrowid)
-    log_booking_event(conn, booking_id, "CREATED", tg_user_id, "", {"source": "telegram_miniapp_api"})
-    sync_booking_state_to_core(conn, booking_id)
-    core_reservation_id = sync_booking_to_core(conn, booking_id)
-    create_outbox_message(
+    result = execute_telegram_miniapp_booking(
       conn,
-      reservation_id=core_reservation_id,
-      platform="telegram",
-      bot_scope="hostess",
-      target_external_id=str(TG_CHAT_ID or "").strip() or None,
-      message_type="reservation_created",
-      payload={"legacy_booking_id": booking_id, "source": "telegram_miniapp_api"},
+      tg_user_id=tg_user_id,
+      date_value=date_value,
+      time_value=time_value,
+      guests_count=guests_count,
+      comment_value=comment_value,
+      reservation_token=reservation_token,
     )
-
-    if TG_CHAT_ID:
-      card_text, kb = render_booking_card(conn, booking_id)
-      try:
-        msg_id = _tg_send(str(TG_CHAT_ID), card_text, kb)
-        if msg_id:
-          conn.execute(
-            "UPDATE bookings SET telegram_chat_id=?, telegram_message_id=?, updated_at=datetime('now') WHERE id=?",
-            (str(TG_CHAT_ID), str(msg_id), booking_id),
-          )
-          link_message_to_reservation(
-            conn,
-            reservation_id=core_reservation_id,
-            platform="telegram",
-            bot_scope="hostess",
-            external_chat_id=str(TG_CHAT_ID),
-            external_message_id=str(msg_id),
-          )
-          log_booking_event(conn, booking_id, "TG_SYNC_OK", "system", "system", {"target_chat_id": str(TG_CHAT_ID)})
-      except Exception as e:
-        log_booking_event(conn, booking_id, "TG_SYNC_FAIL", "system", "system", {"error": str(e)})
-
-    try:
-      sent_count = notify_vk_staff_about_new_booking(conn, booking_id, source="telegram_miniapp_api")
-      if sent_count:
-        log_booking_event(conn, booking_id, "VK_STAFF_SYNC_OK", "system", "system", {"sent_count": sent_count})
-    except Exception as e:
-      log_booking_event(conn, booking_id, "VK_STAFF_SYNC_FAIL", "system", "system", {"error": str(e)})
-
-    try:
-      sync_ok = send_booking_event(
-        conn,
-        booking_id,
-        "BOOKING_UPSERT",
-        {
-          "actor_tg_id": tg_user_id or "system",
-          "actor_name": saved_name or "telegram_miniapp_api",
-          "payload": {"source": "telegram_miniapp_api"},
-        },
-      )
-      if not sync_ok:
-        log_booking_event(conn, booking_id, "CRM_SYNC_FAIL", "system", "system", {"source": "telegram_miniapp_api", "reason": "send_booking_event_false"})
-    except Exception as e:
-      log_booking_event(conn, booking_id, "CRM_SYNC_FAIL", "system", "system", {"source": "telegram_miniapp_api", "reason": str(e)})
-
     conn.commit()
-    return {"ok": True, "booking_id": booking_id}
-  except Exception as e:
+    return result
+  except Exception:
     conn.rollback()
     return {"ok": False, "error": "Ошибка сервера"}, 500
   finally:

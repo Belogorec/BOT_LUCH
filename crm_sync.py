@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 import requests
 
+from booking_service import load_booking_read_model, load_table_read_model
 from config import CRM_API_KEY, CRM_API_URL, CRM_SYNC_TIMEOUT
 
 _session = requests.Session()
@@ -21,11 +22,9 @@ def _row_to_dict(row) -> dict[str, Any]:
 
 
 def _build_payload(conn, booking_id: int, event_name: str, meta: Optional[dict[str, Any]]) -> dict[str, Any]:
-    booking_row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
-    if not booking_row:
+    booking = load_booking_read_model(conn, booking_id)
+    if not booking:
         raise ValueError("booking_not_found")
-
-    booking = _row_to_dict(booking_row)
     raw_payload = {}
     try:
         raw_payload = json.loads(booking.get("raw_payload_json") or "{}")
@@ -65,16 +64,7 @@ def _build_payload(conn, booking_id: int, event_name: str, meta: Optional[dict[s
         target_table_number = booking.get("assigned_table_number")
     try:
         if target_table_number:
-            table_row = conn.execute(
-                """
-                SELECT table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
-                FROM venue_tables
-                WHERE table_number = ?
-                """,
-                (str(target_table_number),),
-            ).fetchone()
-            if table_row:
-                table_payload = _row_to_dict(table_row)
+            table_payload = load_table_read_model(conn, str(target_table_number)) or {}
     except Exception:
         table_payload = {}
 
@@ -101,18 +91,9 @@ def build_booking_sync_payload(
 
 
 def _build_table_payload(conn, table_number: str, event_name: str, meta: Optional[dict[str, Any]]) -> dict[str, Any]:
-    table_row = conn.execute(
-        """
-        SELECT table_number, label, restricted_until, restriction_comment, updated_by, updated_at, created_at
-        FROM venue_tables
-        WHERE table_number = ?
-        """,
-        (str(table_number),),
-    ).fetchone()
-    if not table_row:
+    table_payload = load_table_read_model(conn, str(table_number))
+    if not table_payload:
         raise ValueError("table_not_found")
-
-    table_payload = _row_to_dict(table_row)
     return {
         "event": event_name,
         "source": "luchbarbot",

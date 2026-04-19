@@ -8,7 +8,8 @@ import requests
 
 from flask import request, abort
 
-from core_sync import sync_booking_state_to_core, sync_booking_to_core
+from application import execute_telegram_miniapp_booking
+from core_sync import sync_booking_to_core
 from config import (
     TG_WEBHOOK_SECRET,
     PROMO_ADMIN_IDS,
@@ -28,10 +29,11 @@ from booking_service import (
     compute_segment,
     upsert_guest_if_missing,
     log_booking_event,
+    set_booking_status,
+    load_booking_read_model,
     log_guest_event,
     add_guest_note,
     toggle_guest_tag,
-    ensure_visit_from_confirmed_booking,
     mark_booking_cancelled,
     normalize_table_number,
     parse_restriction_until,
@@ -51,6 +53,7 @@ from db import connect
 from waiter_notify import notify_waiters_about_deposit_booking
 from config import GUEST_COMM_ENABLED, TG_BINDING_START_PREFIX
 from channel_binding_service import consume_binding_token_once
+from hostess_card_delivery import get_hostess_card_link
 from notification_dispatcher import send_service_notification
 from integration_service import record_inbound_event
 
@@ -127,22 +130,27 @@ def _is_waiter_chat(chat_id: str) -> bool:
 
 def _sync_admin_booking_card(conn, booking_id: int) -> None:
     try:
-        booking_row = conn.execute(
+        reservation_row = conn.execute(
             """
-            SELECT telegram_chat_id, telegram_message_id
-            FROM bookings
-            WHERE id=?
+            SELECT id
+            FROM reservations
+            WHERE source='legacy_booking' AND external_ref=?
+            LIMIT 1
             """,
-            (booking_id,),
+            (str(int(booking_id)),),
         ).fetchone()
-        if booking_row and booking_row["telegram_chat_id"] and booking_row["telegram_message_id"]:
-            text_card, kb_card = render_booking_card(conn, booking_id)
-            tg_edit_message(
-                str(booking_row["telegram_chat_id"]),
-                str(booking_row["telegram_message_id"]),
-                text_card,
-                kb_card,
-            )
+        if not reservation_row:
+            return
+        link = get_hostess_card_link(conn, reservation_id=int(reservation_row["id"]))
+        if not link or not link["chat_id"] or not link["message_id"]:
+            return
+        text_card, kb_card = render_booking_card(conn, booking_id)
+        tg_edit_message(
+            link["chat_id"],
+            link["message_id"],
+            text_card,
+            kb_card,
+        )
     except Exception:
         traceback.print_exc()
 
@@ -420,15 +428,7 @@ def tg_webhook_impl():
             if len(parts) >= 3 and parts[0] == "b":
                 booking_id = int(parts[1])
 
-                b = conn.execute(
-                    """
-                    SELECT id, phone_e164, raw_payload_json, assigned_table_number,
-                           reservation_date, reservation_time, reservation_dt, status
-                    FROM bookings
-                    WHERE id=?
-                    """,
-                    (booking_id,),
-                ).fetchone()
+                b = load_booking_read_model(conn, booking_id)
                 if not b:
                     safe_answer_callback(cq_id, "Бронь не найдена")
                     return {"ok": True}
@@ -464,13 +464,7 @@ def tg_webhook_impl():
                             peer_external_id=str(chat_id or ""),
                             reservation_id=core_reservation_id,
                         )
-                        conn.execute(
-                            "UPDATE bookings SET status='CONFIRMED', updated_at=datetime('now') WHERE id=?",
-                            (booking_id,),
-                        )
-                        log_booking_event(conn, booking_id, "CONFIRMED", actor_id, actor_name, {})
-                        ensure_visit_from_confirmed_booking(conn, booking_id, actor_id, actor_name)
-                        sync_booking_state_to_core(conn, booking_id)
+                        set_booking_status(conn, booking_id, "CONFIRMED", actor_id, actor_name, source="telegram")
 
                         # уведомление пользователю только после подтверждения админом
                         try:
@@ -559,10 +553,7 @@ def tg_webhook_impl():
                         # уведомляем администраторов отдельным сообщением
                         if TG_CHAT_ID:
                             try:
-                                brow = conn.execute(
-                                    "SELECT name, phone_e164, reservation_date, reservation_time, guests_count FROM bookings WHERE id=?",
-                                    (booking_id,),
-                                ).fetchone()
+                                brow = load_booking_read_model(conn, booking_id)
                                 guest_name = _h(str(brow["name"] or "—")) if brow else "—"
                                 guest_phone = _h(str(brow["phone_e164"] or "—")) if brow else "—"
                                 res_date = _h(str(brow["reservation_date"] or "—")) if brow else "—"
@@ -887,14 +878,6 @@ def tg_webhook_impl():
                         f"{actor_id}|{chat_id}|{date_value}|{time_value}|{guests_value}|{comment_value}".encode("utf-8")
                     ).hexdigest()
 
-                existing_booking = conn.execute(
-                    "SELECT id FROM bookings WHERE reservation_token=?",
-                    (reservation_token,),
-                ).fetchone()
-                if existing_booking:
-                    tg_send_message(chat_id, "Заявка уже принята в обработку.")
-                    return {"ok": True}
-
                 if not date_value or not time_value or not guests_value:
                     tg_send_message(chat_id, "Форма заполнена не полностью. Откройте её ещё раз.")
                     return {"ok": True}
@@ -909,202 +892,28 @@ def tg_webhook_impl():
                     tg_send_message(chat_id, "Не удалось определить количество гостей. Попробуйте ещё раз.")
                     return {"ok": True}
 
-                # Получаем телефон пользователя из базы
-                user_row = conn.execute(
-                    "SELECT phone_e164, first_name FROM tg_bot_users WHERE tg_user_id=? AND has_shared_phone=1",
-                    (actor_id,),
-                ).fetchone()
-                
-                phone_e164 = user_row["phone_e164"] if user_row else None
-                saved_name = user_row["first_name"] if user_row else None
-
-                # Mini App теперь создает обычную бронь в БД
-                raw_payload = {
-                    "source": "telegram_miniapp",
-                    "requester_chat_id": chat_id,
-                    "requester_tg_user_id": actor_id,
-                    "requester_name": saved_name or actor_name,
-                    "reservation_token": reservation_token,
-                    "date": date_value,
-                    "time": time_value,
-                    "guests": guests_count,
-                    "comment": comment_value,
-                }
-
-                cur = conn.execute(
-                    """
-                    INSERT INTO bookings
-                    (
-                        tranid,
-                        formname,
-                        name,
-                        phone_e164,
-                        phone_raw,
-                        user_chat_id,
-                        reservation_date,
-                        reservation_time,
-                        reservation_dt,
-                        guests_count,
-                        comment,
-                        utm_source,
-                        utm_medium,
-                        utm_campaign,
-                        utm_content,
-                        utm_term,
-                        status,
-                        guest_segment,
-                        reservation_token,
-                        raw_payload_json
-                    )
-                    VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
-                    """,
-                    (
-                        None,
-                        "telegram_miniapp",
-                        saved_name or actor_name or "Telegram",
-                        phone_e164,
-                        phone_e164,
-                        chat_id,
-                        date_value,
-                        time_value,
-                        f"{date_value} {time_value}:00",
-                        guests_count,
-                        comment_value,
-                        "telegram",
-                        "miniapp",
-                        None,
-                        None,
-                        None,
-                        "NEW" if phone_e164 else "NEW",
-                        reservation_token,
-                        json.dumps(raw_payload, ensure_ascii=False),
-                    ),
-                )
-                booking_id = int(cur.lastrowid)
-                print(
-                    f"[MINIAPP] booking created: id={booking_id} "
-                    f"date={date_value} time={time_value} guests={guests_count}",
-                    flush=True,
-                )
-
-                log_booking_event(
+                result = execute_telegram_miniapp_booking(
                     conn,
-                    booking_id,
-                    "CREATED",
-                    actor_id,
-                    actor_name,
-                    {"source": "telegram_miniapp"},
+                    tg_user_id=str(actor_id),
+                    date_value=date_value,
+                    time_value=time_value,
+                    guests_count=guests_count,
+                    comment_value=comment_value,
+                    reservation_token=reservation_token,
                 )
-                sync_booking_state_to_core(conn, booking_id)
-
-                # Проверяем наличие TG_CHAT_ID
-                if not TG_CHAT_ID:
-                    print(f"[MINIAPP] TG_CHAT_ID not configured, booking #{booking_id} NOT sent to admins", flush=True)
-                    log_booking_event(
-                        conn,
-                        booking_id,
-                        "TG_SYNC_FAIL",
-                        "system",
-                        "system",
-                        {
-                            "reason": "TG_CHAT_ID_EMPTY",
-                            "error": "Чат администраторов не настроен",
-                            "source": "telegram_miniapp"
-                        },
-                    )
-                    tg_send_message(
-                        chat_id,
-                        "❌ <b>Ошибка отправки</b>\n\n"
-                        "Заявка сохранена, но чат администраторов не настроен. "
-                        "Свяжитесь с поддержкой."
-                    )
+                if result.get("duplicate"):
+                    tg_send_message(chat_id, "Заявка уже принята в обработку.")
                     return {"ok": True}
-
-                text, kb = render_booking_card(conn, booking_id)
-                print(f"[MINIAPP] sending booking #{booking_id} to admin chat {TG_CHAT_ID}", flush=True)
-                try:
-                    msg_id = tg_send_message(str(TG_CHAT_ID), text, kb)
-                    if not msg_id:
-                        raise RuntimeError("Telegram sendMessage returned empty message_id")
-                except Exception as e:
-                    print(f"[MINIAPP] ERROR sending booking #{booking_id} to admin chat {TG_CHAT_ID}: {e}", flush=True)
-                    log_booking_event(
-                        conn,
-                        booking_id,
-                        "TG_SYNC_FAIL",
-                        "system",
-                        "system",
-                        {
-                            "reason": "SEND_TO_ADMIN_CHAT_FAILED",
-                            "target_chat_id": str(TG_CHAT_ID),
-                            "error": str(e),
-                            "source": "telegram_miniapp"
-                        },
-                    )
-                    tg_send_message(
-                        chat_id,
-                        "❌ <b>Ошибка отправки</b>\n\n"
-                        "Заявка сохранена, но чат администраторов недоступен. "
-                        "Попробуйте ещё раз позже или свяжитесь прямо по телефону."
-                    )
-                    return {"ok": True}
-
-                conn.execute(
-                    """
-                    UPDATE bookings
-                    SET telegram_chat_id=?, telegram_message_id=?, updated_at=datetime('now')
-                    WHERE id=?
-                    """,
-                    (str(TG_CHAT_ID), str(msg_id), booking_id),
-                )
-
-                log_booking_event(
-                    conn,
-                    booking_id,
-                    "TG_SYNC_OK",
-                    "system",
-                    "system",
-                    {"target_chat_id": str(TG_CHAT_ID), "status": "sent", "source": "telegram_miniapp"},
-                )
-                print(f"[MINIAPP] booking #{booking_id} sent OK, msg_id={msg_id}", flush=True)
 
                 # гостю пока не подтверждаем бронь — только сообщаем, что заявка принята в работу
-                waiting_text = (
-                    "🕓 <b>Заявка отправлена</b>\n\n"
-                    "Мы передали её администратору.\n"
-                    "Сообщение о подтверждении придёт сюда после проверки."
+                tg_send_message(
+                    chat_id,
+                    (
+                        "🕓 <b>Заявка отправлена</b>\n\n"
+                        "Мы передали её администратору.\n"
+                        "Сообщение о подтверждении придёт сюда после проверки."
+                    ),
                 )
-                tg_send_message(chat_id, waiting_text)
-                try:
-                    sync_ok = send_booking_event(
-                        conn,
-                        booking_id,
-                        "BOOKING_UPSERT",
-                        {
-                            "actor_tg_id": actor_id,
-                            "actor_name": actor_name,
-                            "payload": {"source": "telegram_miniapp"},
-                        },
-                    )
-                    if not sync_ok:
-                        log_booking_event(
-                            conn,
-                            booking_id,
-                            "CRM_SYNC_FAIL",
-                            "system",
-                            "system",
-                            {"source": "telegram_miniapp", "reason": "send_booking_event_false"},
-                        )
-                except Exception:
-                    log_booking_event(
-                        conn,
-                        booking_id,
-                        "CRM_SYNC_FAIL",
-                        "system",
-                        "system",
-                        {"source": "telegram_miniapp", "reason": "send_booking_event_exception"},
-                    )
                 return {"ok": True}
 
             text = (m.get("text") or "").strip()
@@ -1147,7 +956,7 @@ def tg_webhook_impl():
                                 tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
                                 return {"ok": True}
 
-                            booking_row = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+                            booking_row = load_booking_read_model(conn, booking_id)
                             if not booking_row:
                                 conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
                                 tg_send_message(chat_id, "Бронь не найдена.")
@@ -1227,10 +1036,7 @@ def tg_webhook_impl():
                                 notify_waiters_about_deposit_booking(conn, booking_id)
                             except Exception:
                                 traceback.print_exc()
-                            booking_state = conn.execute(
-                                "SELECT assigned_table_number FROM bookings WHERE id = ?",
-                                (booking_id,),
-                            ).fetchone()
+                            booking_state = load_booking_read_model(conn, booking_id)
                             if booking_state and not booking_state["assigned_table_number"]:
                                 _create_pending_reply(
                                     conn,
@@ -1421,24 +1227,7 @@ def tg_webhook_impl():
                         conn.execute("DELETE FROM pending_replies WHERE id=?", (_note_row["id"],))
 
                         try:
-                            text_card, kb_card = render_booking_card(conn, booking_id)
-
-                            booking_row = conn.execute(
-                                """
-                                SELECT telegram_chat_id, telegram_message_id
-                                FROM bookings
-                                WHERE id=?
-                                """,
-                                (booking_id,),
-                            ).fetchone()
-
-                            if booking_row and booking_row["telegram_chat_id"] and booking_row["telegram_message_id"]:
-                                tg_edit_message(
-                                    str(booking_row["telegram_chat_id"]),
-                                    str(booking_row["telegram_message_id"]),
-                                    text_card,
-                                    kb_card,
-                                )
+                            _sync_admin_booking_card(conn, booking_id)
                         except Exception:
                             pass
 

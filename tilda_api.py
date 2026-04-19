@@ -1,23 +1,9 @@
-import json
-import re
-import secrets
+from flask import abort, request
 
-from flask import request, abort
-
-from core_sync import sync_booking_state_to_core, sync_booking_to_core
-from config import TILDA_SECRET, TG_CHAT_ID
-from telegram_api import tg_send_message, tg_edit_message
-from booking_service import (
-    compute_segment,
-    upsert_guest_if_missing,
-    log_booking_event,
-)
-from booking_render import render_booking_card
-from crm_sync import send_booking_event
-from db import connect, get_tags
-from vk_staff_notify import notify_vk_staff_about_new_booking
-from channel_binding_service import build_guest_page_public_url
-from integration_service import create_outbox_message, link_message_to_reservation
+from application import execute_tilda_booking_webhook
+from config import TILDA_SECRET
+from db import connect
+from integration.inbound.tilda_parser import parse_tilda_booking_payload
 
 
 def ensure_db():
@@ -33,367 +19,32 @@ def tilda_webhook_impl(normalize_name, normalize_phone_e164, normalize_time_hhmm
     if payload is None:
         payload = request.form.to_dict(flat=True)
     payload = payload or {}
-
-    def normalize_payload_key(v):
-        s = str(v or "").strip().lower().replace("ё", "е")
-        return re.sub(r"[^0-9a-zа-я]+", "", s)
-
-    normalized_payload = {}
-    for k, v in payload.items():
-        nk = normalize_payload_key(k)
-        if nk and nk not in normalized_payload:
-            normalized_payload[nk] = v
-
-    def pick(*keys, default=""):
-        for k in keys:
-            v = payload.get(k)
-            if v is None:
-                v = normalized_payload.get(normalize_payload_key(k))
-            if v is not None:
-                s = str(v).strip()
-                if s:
-                    return s
-        return default
-
-    def pick_int_from_text(*keys):
-        raw = pick(*keys, default="")
-        if not raw:
-            return None
-        m = re.search(r"\d+", raw)
-        if not m:
-            return None
-        value = int(m.group(0))
-        return value if 1 <= value <= 50 else None
-
-    name = normalize_name(
-        pick(
-            "Name", "name", "NAME",
-            "Имя", "имя",
-            default=""
-        )
+    parsed = parse_tilda_booking_payload(
+        payload,
+        normalize_name=normalize_name,
+        normalize_phone_e164=normalize_phone_e164,
+        normalize_time_hhmm=normalize_time_hhmm,
     )
-
-    phone_raw = pick(
-        "Phone", "phone", "PHONE",
-        "Телефон", "телефон",
-        "Mobile", "mobile",
-        default=""
-    )
-    phone_e164 = normalize_phone_e164(phone_raw, default_region="RU")
-
-    date_raw = pick(
-        "date", "Date", "DATE",
-        "reservation_date", "Reservation date",
-        "Дата", "дата",
-        default=""
-    ).strip()
-
-    time_raw_src = pick(
-        "time", "Time", "TIME",
-        "reservation_time", "Reservation time",
-        "Время", "время",
-        default=""
-    ).strip()
-    time_raw = normalize_time_hhmm(time_raw_src)
-
-    guests_count = pick_int_from_text(
-        "amountofguests", "guests", "Guests", "guests_count", "guestscount",
-        "guest_count", "guestcount", "number_of_guests", "guests_number",
-        "persons", "people", "qty", "count",
-        "kolichestvogostey", "kolichestvogostei",
-        "Количество гостей", "количество гостей",
-        "Количествогостей", "количествогостеи", "количествогостеи",
-        "Гостей", "гостей"
-    )
-
-    if guests_count is None:
-        for k, v in payload.items():
-            key_norm = normalize_payload_key(k)
-            if not key_norm:
-                continue
-
-            looks_like_guest_count = (
-                key_norm in {
-                    "гостей",
-                    "гости",
-                    "guests",
-                    "guestscount",
-                    "guestcount",
-                    "persons",
-                    "people",
-                }
-                or ("guest" in key_norm and any(token in key_norm for token in ("count", "qty", "amount", "number", "num")))
-                or ("гост" in key_norm and any(token in key_norm for token in ("кол", "числ", "сколь")))
-            )
-            if not looks_like_guest_count:
-                continue
-
-            raw_val = str(v or "").strip()
-            m = re.search(r"\d+", raw_val)
-            if not m:
-                continue
-            parsed = int(m.group(0))
-            if 1 <= parsed <= 50:
-                guests_count = parsed
-                break
-
-    comment = pick(
-        "comment", "Comment", "Comments",
-        "Комментарий", "комментарий",
-        "Комментарий к бронированию", "commentary",
-        default=""
-    )
-
-    tranid = pick("tranid", "Tranid", "TRANID", default="")
-    formname = pick("formname", "Formname", "FORMNAME", default="Бронь стола")
-
-    utm_source = pick("utm_source", default="")
-    utm_medium = pick("utm_medium", default="")
-    utm_campaign = pick("utm_campaign", default="")
-    utm_content = pick("utm_content", default="")
-    utm_term = pick("utm_term", default="")
-
-    reservation_dt = f"{date_raw}T{time_raw}" if (date_raw and time_raw) else ""
 
     conn = ensure_db()
-    booking_id = None
-    tg_status = "skipped"
-    reservation_token = ""
-
     try:
-        if phone_e164:
-            upsert_guest_if_missing(conn, phone_e164, name)
-
-        tags = get_tags(conn, phone_e164) if phone_e164 else []
-        g_row = conn.execute(
-            "SELECT visits_count FROM guests WHERE phone_e164=?",
-            (phone_e164,),
-        ).fetchone() if phone_e164 else None
-        visits_count = int(g_row["visits_count"] or 0) if g_row else 0
-        guest_segment = compute_segment(visits_count, tags)
-
-        existing = None
-        if tranid:
-            existing = conn.execute(
-                "SELECT id, telegram_chat_id, telegram_message_id FROM bookings WHERE tranid=?",
-                (tranid,),
-            ).fetchone()
-
-        if existing:
-            booking_id = int(existing["id"])
-            existing_token_row = conn.execute("SELECT reservation_token FROM bookings WHERE id=?", (booking_id,)).fetchone()
-            reservation_token = str(existing_token_row["reservation_token"] or "").strip() if existing_token_row else ""
-            if not reservation_token:
-                reservation_token = secrets.token_urlsafe(24)
-            conn.execute(
-                """
-                UPDATE bookings
-                SET name=?,
-                    phone_e164=?,
-                    phone_raw=?,
-                    reservation_date=?,
-                    reservation_time=?,
-                    reservation_dt=?,
-                    guests_count=?,
-                    comment=?,
-                    utm_source=?,
-                    utm_medium=?,
-                    utm_campaign=?,
-                    utm_content=?,
-                    utm_term=?,
-                    formname=?,
-                    guest_segment=?,
-                    reservation_token=?,
-                    raw_payload_json=?,
-                    updated_at=datetime('now')
-                WHERE id=?
-                """,
-                (
-                    name,
-                    phone_e164,
-                    phone_raw,
-                    date_raw,
-                    time_raw,
-                    reservation_dt,
-                    guests_count,
-                    comment,
-                    utm_source,
-                    utm_medium,
-                    utm_campaign,
-                    utm_content,
-                    utm_term,
-                    formname,
-                    guest_segment,
-                    reservation_token,
-                    json.dumps(payload, ensure_ascii=False),
-                    booking_id,
-                ),
-            )
-            log_booking_event(
-                conn,
-                booking_id,
-                "UPDATED",
-                "system",
-                "system",
-                {"source": "tilda"},
-            )
-            sync_booking_state_to_core(conn, booking_id)
-        else:
-            cur = conn.execute(
-                """
-                INSERT INTO bookings
-                  (tranid, formname, name, phone_e164, phone_raw, reservation_date, reservation_time, reservation_dt,
-                   guests_count, comment, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-                   status, guest_segment, reservation_token, raw_payload_json)
-                VALUES
-                  (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
-                """,
-                (
-                    tranid or None,
-                    formname,
-                    name,
-                    phone_e164,
-                    phone_raw,
-                    date_raw,
-                    time_raw,
-                    reservation_dt,
-                    guests_count,
-                    comment,
-                    utm_source,
-                    utm_medium,
-                    utm_campaign,
-                    utm_content,
-                    utm_term,
-                    guest_segment,
-                    reservation_token or secrets.token_urlsafe(24),
-                    json.dumps(payload, ensure_ascii=False),
-                ),
-            )
-            booking_id = int(cur.lastrowid)
-            if not reservation_token:
-                row = conn.execute("SELECT reservation_token FROM bookings WHERE id=?", (booking_id,)).fetchone()
-                reservation_token = str(row["reservation_token"] or "").strip() if row else ""
-            log_booking_event(conn, booking_id, "CREATED", "system", "system", {"source": "tilda"})
-            sync_booking_state_to_core(conn, booking_id)
-        core_reservation_id = sync_booking_to_core(conn, booking_id)
-        create_outbox_message(
+        return execute_tilda_booking_webhook(
             conn,
-            reservation_id=core_reservation_id,
-            platform="telegram",
-            bot_scope="hostess",
-            target_external_id=str(TG_CHAT_ID or "").strip() or None,
-            message_type="reservation_created",
-            payload={"legacy_booking_id": booking_id, "source": "tilda"},
+            payload=parsed["payload"],
+            name=parsed["name"],
+            phone_raw=parsed["phone_raw"],
+            phone_e164=parsed["phone_e164"],
+            date_raw=parsed["date_raw"],
+            time_raw=parsed["time_raw"],
+            guests_count=parsed["guests_count"],
+            comment=parsed["comment"],
+            tranid=parsed["tranid"],
+            formname=parsed["formname"],
+            utm_source=parsed["utm_source"],
+            utm_medium=parsed["utm_medium"],
+            utm_campaign=parsed["utm_campaign"],
+            utm_content=parsed["utm_content"],
+            utm_term=parsed["utm_term"],
         )
-
-        conn.commit()
-
-        try:
-            sync_ok = send_booking_event(
-                conn,
-                booking_id,
-                "BOOKING_UPSERT",
-                {
-                    "actor_tg_id": "system",
-                    "actor_name": "tilda",
-                    "payload": {"source": "tilda", "tg_status": tg_status},
-                },
-            )
-            if not sync_ok:
-                log_booking_event(
-                    conn,
-                    booking_id,
-                    "CRM_SYNC_FAIL",
-                    "system",
-                    "system",
-                    {"source": "tilda", "reason": "send_booking_event_false"},
-                )
-        except Exception:
-            log_booking_event(
-                conn,
-                booking_id,
-                "CRM_SYNC_FAIL",
-                "system",
-                "system",
-                {"source": "tilda", "reason": "send_booking_event_exception"},
-            )
-
-        try:
-            text, kb = render_booking_card(conn, booking_id)
-
-            if existing and existing["telegram_chat_id"] and existing["telegram_message_id"]:
-                tg_edit_message(existing["telegram_chat_id"], existing["telegram_message_id"], text, kb)
-                tg_status = "edited"
-            else:
-                msg_id = tg_send_message(TG_CHAT_ID, text, kb)
-                conn.execute(
-                    "UPDATE bookings SET telegram_chat_id=?, telegram_message_id=?, updated_at=datetime('now') WHERE id=?",
-                    (str(TG_CHAT_ID), str(msg_id), booking_id),
-                )
-                link_message_to_reservation(
-                    conn,
-                    reservation_id=core_reservation_id,
-                    platform="telegram",
-                    bot_scope="hostess",
-                    external_chat_id=str(TG_CHAT_ID),
-                    external_message_id=str(msg_id),
-                )
-                tg_status = "sent"
-
-            log_booking_event(
-                conn,
-                booking_id,
-                "TG_SYNC_OK",
-                "system",
-                "system",
-                {"status": tg_status},
-            )
-            conn.commit()
-
-        except Exception as e:
-            log_booking_event(
-                conn,
-                booking_id,
-                "TG_SYNC_ERROR",
-                "system",
-                "system",
-                {
-                    "error": str(e),
-                    "stage": "render_or_send",
-                },
-            )
-            conn.commit()
-            tg_status = "error"
-
-        try:
-            sent_count = notify_vk_staff_about_new_booking(conn, booking_id, source="tilda")
-            if sent_count:
-                log_booking_event(
-                    conn,
-                    booking_id,
-                    "VK_STAFF_SYNC_OK",
-                    "system",
-                    "system",
-                    {"source": "tilda", "sent_count": sent_count},
-                )
-                conn.commit()
-        except Exception as e:
-            log_booking_event(
-                conn,
-                booking_id,
-                "VK_STAFF_SYNC_FAIL",
-                "system",
-                "system",
-                {"source": "tilda", "error": str(e)},
-            )
-            conn.commit()
-
-        return {
-            "ok": True,
-            "booking_id": booking_id,
-            "tg_status": tg_status,
-            "guest_page_url": build_guest_page_public_url(reservation_token),
-        }
-
     finally:
         conn.close()

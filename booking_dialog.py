@@ -162,20 +162,63 @@ def ask_phone(chat_id: str, user_id: str) -> Tuple[str, dict]:
 
 def get_existing_user_data(conn, user_id: str) -> Optional[Tuple[str, str]]:
     """Проверяет есть ли у пользователя предыдущие бронирования и возвращает имя и телефон."""
-    row = conn.execute(
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        return None
+
+    phone = ""
+
+    tg_user_row = conn.execute(
         """
-        SELECT name, phone_e164
-        FROM bookings
-        WHERE user_chat_id=? OR telegram_chat_id=?
-        ORDER BY created_at DESC
+        SELECT phone_e164, first_name
+        FROM tg_bot_users
+        WHERE tg_user_id=?
         LIMIT 1
         """,
-        (user_id, user_id),
+        (normalized_user_id,),
     ).fetchone()
-    
+    if tg_user_row:
+        phone = str(tg_user_row["phone_e164"] or "").strip()
+
+    if not phone:
+        channel_row = conn.execute(
+            """
+            SELECT c.phone_e164
+            FROM contact_channels cc
+            JOIN contacts c
+              ON c.id = cc.contact_id
+            WHERE cc.platform='telegram'
+              AND cc.external_user_id=?
+              AND cc.status='active'
+            ORDER BY datetime(cc.updated_at) DESC, cc.id DESC
+            LIMIT 1
+            """,
+            (normalized_user_id,),
+        ).fetchone()
+        if channel_row:
+            phone = str(channel_row["phone_e164"] or "").strip()
+
+    if not phone:
+        return None
+
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(trim(r.guest_name), ''), NULLIF(trim(c.display_name), ''), '') AS guest_name,
+            c.phone_e164 AS phone_e164
+        FROM contacts c
+        LEFT JOIN reservations r
+          ON r.guest_phone = c.phone_e164
+        WHERE c.phone_e164=?
+        ORDER BY datetime(r.created_at) DESC, r.id DESC
+        LIMIT 1
+        """,
+        (phone,),
+    ).fetchone()
+
     if row and row["phone_e164"]:
-        return row["name"] or "", row["phone_e164"]
-    
+        return row["guest_name"] or "", row["phone_e164"]
+
     return None
 
 

@@ -1,36 +1,51 @@
 import html
 from typing import Optional
 
+from booking_service import load_booking_read_model
 from config import WAITER_CHAT_ID
+from integration_service import create_outbox_message
 from local_log import log_event
-from telegram_api import tg_send_message
+from outbox_dispatcher import dispatch_outbox_message
 
 
 def _h(value: object) -> str:
     return html.escape(str(value or ""), quote=False)
 
 
-def _load_waiter_booking_row(conn, booking_id: int):
-    row = conn.execute(
+def _load_waiter_booking_row_core(conn, booking_id: int):
+    return conn.execute(
         """
         SELECT
-            id,
-            name,
-            phone_e164,
-            phone_raw,
-            reservation_date,
-            reservation_time,
-            guests_count,
-            comment,
-            assigned_table_number,
-            deposit_amount,
-            deposit_comment
-        FROM bookings
-        WHERE id = ?
+            r.id AS reservation_id,
+            r.guest_name AS name,
+            r.guest_phone AS phone_e164,
+            NULL AS phone_raw,
+            substr(r.reservation_at, 1, 10) AS reservation_date,
+            substr(r.reservation_at, 12, 5) AS reservation_time,
+            r.party_size AS guests_count,
+            r.comment AS comment,
+            tc.code AS assigned_table_number,
+            r.deposit_amount AS deposit_amount,
+            r.deposit_comment AS deposit_comment
+        FROM reservations r
+        LEFT JOIN reservation_tables rt
+          ON rt.reservation_id = r.id
+         AND rt.released_at IS NULL
+        LEFT JOIN tables_core tc
+          ON tc.id = rt.table_id
+        WHERE r.source = 'legacy_booking' AND r.external_ref = ?
+        ORDER BY rt.id DESC
+        LIMIT 1
         """,
-        (int(booking_id),),
+        (str(int(booking_id)),),
     ).fetchone()
-    return row
+
+
+def _load_waiter_booking_row(conn, booking_id: int):
+    row = _load_waiter_booking_row_core(conn, booking_id)
+    if row:
+        return row
+    return load_booking_read_model(conn, int(booking_id))
 
 
 def _build_waiter_message_from_row(row, *, rich_text: bool) -> Optional[str]:
@@ -106,6 +121,16 @@ def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
 
     delivered = False
     if has_waiter_tg:
+        core_row = conn.execute(
+            """
+            SELECT id
+            FROM reservations
+            WHERE source='legacy_booking' AND external_ref=?
+            LIMIT 1
+            """,
+            (str(int(booking_id)),),
+        ).fetchone()
+        core_reservation_id = int(core_row["id"]) if core_row else None
         log_event(
             "WAITER-NOTIFY",
             status="send",
@@ -114,20 +139,64 @@ def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
             table=table_number,
             deposit=deposit_amount,
         )
-        message_id = tg_send_message(target_chat_id, text)
-        log_event(
-            "WAITER-NOTIFY",
-            status="sent",
-            booking_id=int(booking_id),
-            chat_id=target_chat_id,
-            message_id=message_id,
+        outbox_id = create_outbox_message(
+            conn,
+            reservation_id=core_reservation_id,
+            platform="telegram",
+            bot_scope="waiter",
+            message_type="waiter_deposit_notification",
+            payload={"text": text, "source": "deposit_booking", "booking_id": int(booking_id)},
+            target_external_id=target_chat_id,
         )
-        delivered = True
+        result = dispatch_outbox_message(conn, outbox_id)
+        if result.get("ok"):
+            log_event(
+                "WAITER-NOTIFY",
+                status="sent",
+                booking_id=int(booking_id),
+                chat_id=target_chat_id,
+                message_id=result.get("provider_message_id") or "-",
+            )
+            delivered = True
+        else:
+            log_event(
+                "WAITER-NOTIFY",
+                status="failed",
+                booking_id=int(booking_id),
+                chat_id=target_chat_id,
+                error=str(result.get("error") or "dispatch_failed"),
+            )
     else:
         log_event("WAITER-NOTIFY", status="skip", booking_id=int(booking_id), reason="missing_waiter_chat_id")
 
-    from vk_staff_notify import notify_vk_waiters
+    from vk_staff_notify import fetch_active_vk_staff_peers
 
     waiter_vk_text = build_waiter_vk_booking_message(conn, booking_id) or text
-    waiter_vk_sent = notify_vk_waiters(conn, waiter_vk_text, source="deposit_booking", booking_id=int(booking_id))
-    return delivered or bool(waiter_vk_sent)
+    peers = fetch_active_vk_staff_peers(conn, bot_key="waiter")
+    vk_sent = 0
+    for peer in peers:
+        peer_id = str(peer.get("peer_id") or "").strip()
+        if not peer_id:
+            continue
+        outbox_id = create_outbox_message(
+            conn,
+            reservation_id=None,
+            platform="vk",
+            bot_scope="waiter",
+            message_type="waiter_deposit_notification",
+            payload={"text": waiter_vk_text, "source": "deposit_booking", "booking_id": int(booking_id)},
+            target_external_id=peer_id,
+        )
+        result = dispatch_outbox_message(conn, outbox_id)
+        if result.get("ok"):
+            vk_sent += 1
+            log_event("VK-WAITER-NOTIFY", status="sent", booking_id=int(booking_id), peer_id=peer_id, source="deposit_booking")
+        else:
+            log_event(
+                "VK-WAITER-NOTIFY",
+                status="failed",
+                booking_id=int(booking_id),
+                peer_id=peer_id,
+                error=str(result.get("error") or "dispatch_failed"),
+            )
+    return delivered or bool(vk_sent)

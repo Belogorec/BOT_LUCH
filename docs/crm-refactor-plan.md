@@ -1,185 +1,152 @@
 # CRM Refactor Plan
 
-## Goal
+## Цель
 
-Привести систему к простому и устойчивому ядру CRM, в котором остаются только:
+Собрать устойчивое CRM-ядро, где критический путь ограничен только доменными сценариями бронирования:
 
-- брони;
-- столы;
-- назначения столов на бронь;
-- блокировки столов;
-- история изменений.
+- бронь;
+- стол;
+- назначение стола на бронь;
+- блокировка стола;
+- история доменных событий.
 
-Все остальные сценарии должны быть либо вынесены из ядра, либо отключаемы как внешние модули.
+Интеграции (Telegram, VK, Tilda, CRM sync, waiter notify, guest-модули) остаются адаптерами вокруг ядра и не определяют доменную модель.
 
-## Current Problems
+## Что считаем ядром
 
-### Data model
+### Доменные сущности
 
-- `bookings` совмещает доменные данные брони, интеграционные поля, токены, депозит, канал связи и сырой payload.
-- гостевая модель раздвоена между `guests` и `guest_visits`, причем агрегаты пересчитываются кодом;
-- ряд связей завязан на `phone_e164`, а не на стабильные внутренние идентификаторы;
-- номер стола в логике трактуется как `TEXT`, а в реальной SQLite-схеме еще хранится как `INTEGER`;
-- часть схемы уже живет в коде, но еще не применена к фактической базе.
+- `reservations`
+- `tables`
+- `reservation_tables`
+- `table_blocks`
+- `reservation_events`
 
-### Code structure
+### Вне ядра (legacy / adapters)
 
-- HTTP, Telegram, VK, Tilda, CRM sync и waiter-уведомления связаны напрямую через `flask_app.py`;
-- бизнес-логика и интеграции перемешаны;
-- `db.py` одновременно хранит схему, миграции, seed-логику и guest/distribution модули.
+- `guests`, `guest_visits`, `guest_notes`, `guest_events`
+- `pending_replies`, `discount_codes`, `tg_bot_users`
+- `lineup_posters`, `processed_tg_updates`, `vk_staff_peers`
+- `guest_channel_bindings`, `guest_binding_tokens`, `notification_delivery_log`
 
-## Target Architecture
+## Архитектурные правила
 
-### Core modules
+- Route layer: только HTTP/transport, валидация входа, маппинг request/response.
+- Application layer: use-cases входящих потоков (`telegram_miniapp`, `tilda`, `vk`, `crm`).
+- Domain/service layer: бизнес-правила, инварианты, аудит.
+- Data layer: работа с core-таблицами и миграциями.
+- Любая новая inbound-логика идёт по шаблону: `route -> parser -> application use-case -> domain service`.
 
-- `core_schema.py` или аналогичный модуль со схемой нового ядра;
-- `booking_service.py` как доменная логика броней и столов;
-- `flask_app.py` как тонкий слой маршрутов;
-- отдельные адаптеры интеграций, не влияющие на модель ядра.
+## Фазы
 
-### Target entities
+### Phase 1. Domain command boundary
 
-#### `reservations`
+Сделано:
+- добавлены доменные команды/DTO/ошибки для валидации операций ядра.
 
-Хранит только бронь:
+Критерий готовности:
+- сервисные операции проходят через единый набор команд и ограничений.
 
-- `id`
-- `source`
-- `external_ref`
-- `guest_name`
-- `guest_phone`
-- `reservation_at`
-- `party_size`
-- `comment`
-- `status`
-- `created_at`
-- `updated_at`
+### Phase 2. Core schema bootstrap
 
-#### `tables`
+Сделано:
+- включена инициализация core-схемы и idempotent-механика миграций рядом с legacy.
 
-Справочник столов:
+Критерий готовности:
+- core-таблицы поднимаются без удаления legacy-структур.
 
-- `id`
-- `code`
-- `title`
-- `capacity`
-- `zone`
-- `is_active`
-- `created_at`
-- `updated_at`
+### Phase 3. Core sync + dual-write readiness
 
-`code` хранится как `TEXT`.
+Сделано:
+- подключён синк состояния брони/столов в core-слой.
 
-#### `reservation_tables`
+Критерий готовности:
+- операции в runtime отражаются в core без потери совместимости.
 
-Связь брони и стола:
+### Phase 4. Application-layer унификация inbound
 
-- `id`
-- `reservation_id`
-- `table_id`
-- `assigned_at`
-- `assigned_by`
-- `released_at`
+Сделано:
+- `telegram miniapp booking` вынесен в `application/miniapp_booking.py`.
+- `tilda booking creation` вынесен в `application/tilda_booking.py`.
+- `tilda_api.py` оставлен как transport/parser-адаптер.
 
-#### `table_blocks`
+Критерий готовности:
+- inbound-потоки не содержат бизнес-логики в route-обработчиках.
 
-Блокировки и ограничения стола:
+### Phase 5. Backend switch to core-first behavior
 
-- `id`
-- `table_id`
-- `starts_at`
-- `ends_at`
-- `reason`
-- `block_type`
-- `reservation_id`
-- `created_by`
-- `created_at`
+Цель:
+- перевести доменные операции (бронь/стол/блокировки) на core-таблицы как источник истины.
 
-#### `reservation_events`
+Задачи:
+- переключить чтение доменных карточек и списков на core-модель;
+- переключить write-path критических операций на core;
+- оставить compatibility-read/bridge до завершения приёмки;
+- изолировать внешние sync/notify от принятия доменных решений.
 
-Аудит доменных событий:
+Критерий готовности:
+- доменные решения не зависят от legacy-таблиц.
 
-- `id`
-- `reservation_id`
-- `event_type`
-- `actor`
-- `payload_json`
-- `created_at`
+### Phase 5.5. Parser split for inbound adapters
 
-## Legacy Scope
+(Добавлено после Phase 5.)
 
-### Keep in legacy or move out of core
+Цель:
+- довести inbound до полностью единообразной схемы.
 
-- `guests`
-- `guest_visits`
-- `guest_notes`
-- `guest_events`
-- `pending_replies`
-- `discount_codes`
-- `tg_bot_users`
-- `lineup_posters`
-- `processed_tg_updates`
-- `vk_staff_peers`
-- `guest_channel_bindings`
-- `guest_binding_tokens`
-- `notification_delivery_log`
+Задачи:
+- вынести parsing/normalization Tilda payload в отдельный parser-модуль;
+- применить ту же схему к VK/CRM inbound, где ещё смешаны parsing и orchestration;
+- зафиксировать единый контракт input DTO для application use-cases.
 
-Эти сущности не должны участвовать в принятии решений ядром CRM.
+Критерий готовности:
+- все inbound каналы имеют структуру `route -> parser -> application`, без дублирования правил парсинга.
 
-## Refactor Stages
+### Phase 6. Legacy archive
 
-### Stage 1. Freeze the target model
+Цель:
+- убрать legacy из runtime-критического пути.
 
-- зафиксировать целевую ER-модель;
-- описать, какие таблицы становятся `legacy_*`;
-- перестать добавлять новую бизнес-логику в текущую схему.
+Задачи:
+- пометить legacy-таблицы read-only;
+- переименовать в `legacy_*` или явно задокументировать архивный статус;
+- удалить зависимости на legacy из primary-path кода.
 
-### Stage 2. Introduce the new core schema
+Критерий готовности:
+- runtime не пишет в legacy-структуры, кроме контролируемого архива.
 
-- добавить новый модуль схемы;
-- создать новые таблицы рядом с текущими, без удаления старых;
-- добавить явные `FOREIGN KEY` и индексы;
-- подготовить функции переноса данных.
+### Phase 7. CRM/API rebuild
 
-### Stage 3. Migrate data
+Цель:
+- собрать чистый API/CRM UI поверх stable core-модели.
 
-- перенести брони из `bookings` в `reservations`;
-- перенести столы из `venue_tables` в `tables`;
-- перенести назначения столов в `reservation_tables`;
-- преобразовать текущие ограничения в `table_blocks`;
-- перенести доменную историю в `reservation_events`.
+Задачи:
+- новый backend API для базовых доменных операций;
+- новый CRM UI на core endpoints;
+- возврат интеграций только как подключаемых адаптеров.
 
-### Stage 4. Switch backend to core tables
+Критерий готовности:
+- UI и API работают на core без скрытых legacy-зависимостей.
 
-- переписать чтение и запись доменных операций на новые таблицы;
-- ограничить API тремя базовыми сценариями:
-  - создание/редактирование брони;
-  - назначение/снятие стола;
-  - блокировка/разблокировка стола;
-- убрать из критического пути CRM sync, guest communication, VK/TG service modules.
+## Safety / Rollout
 
-### Stage 5. Archive legacy
+- Не удалять legacy-данные до финальной сверки.
+- Любое переключение делать через dual-write/compat-read этап.
+- На каждый switch иметь rollback-флаг или обратимый migration script.
+- Для интеграционных изменений проверять связки:
+  - `BOT_LUCH -> LUCH_crm` (`CRM_API_URL`, `CRM_API_KEY`, `BOT_SYNC_API_URL`, `CRM_INGEST_API_KEY`)
+  - `relay -> BOT_LUCH` (`MAIN_BOT_URL`, `MAIN_BOT_TILDA_SECRET`, `MAIN_BOT_TG_SECRET`)
+  - waiter notify (`WAITER_CHAT_ID`, VK waiter creds)
 
-- перевести старые таблицы в read-only режим;
-- переименовать в `legacy_*` либо оставить как архив без участия в runtime;
-- удалить старые зависимости из основного приложения.
+## Definition of Done (per phase)
 
-### Stage 6. Rebuild CRM and frontend
+- Код: изменения в нужных слоях без разрастания `flask_app.py`.
+- Данные: миграции idempotent и обратимы процедурно.
+- Наблюдаемость: события ошибок логируются в доменной истории/логах.
+- Совместимость: существующие входящие каналы не ломаются.
 
-- собрать чистый backend API;
-- построить новый CRM UI поверх стабильной модели;
-- затем отдельно вернуть нужные интеграции, если они действительно нужны.
+## Ближайший practical next step
 
-## Safety Rules
-
-- не удалять старые таблицы до завершения миграции и сверки;
-- сначала запускать dual-write или scripted migration, потом переключать чтение;
-- хранить legacy-данные до полного завершения приемки;
-- не смешивать новый core runtime с guest/marketing/staff модулями.
-
-## Immediate Work Plan
-
-1. Добавить новый модуль схемы ядра.
-2. Подготовить idempotent-инициализацию новых core-таблиц.
-3. Подготовить отдельный модуль миграции `bookings -> reservations`.
-4. После этого переключить доменную логику броней и столов на новый слой данных.
+1. Начать Phase 5 с выбора одного сценария-пилота: `assign/clear table` как first core-first write-path.
+2. Добавить compatibility-read adapter для карточки брони, чтобы UI не ломался при переключении.
+3. После стабилизации — аналогично перевести `set/clear deposit` и status transitions.

@@ -13,6 +13,7 @@ from config import (
     TG_BOT_USERNAME,
     VK_GUEST_GROUP_ID,
 )
+from booking_service import ensure_public_reservation_token, load_booking_read_model, log_booking_event
 from local_log import log_event
 
 SUPPORTED_CHANNELS = {"telegram", "vk"}
@@ -38,17 +39,264 @@ def _normalize_channel(channel_type: str) -> str:
     return c
 
 
-def _load_booking_by_reservation_token(conn, reservation_token: str):
-    return conn.execute(
+def _resolve_core_reservation_id(conn, reservation_id: int) -> Optional[int]:
+    rid = int(reservation_id or 0)
+    if rid <= 0:
+        return None
+
+    direct = conn.execute("SELECT id FROM reservations WHERE id=?", (rid,)).fetchone()
+    if direct:
+        return int(direct["id"])
+
+    mapped = conn.execute(
         """
-        SELECT id, reservation_token, phone_e164, name, reservation_date, reservation_time, guests_count,
-               status, preferred_channel, service_notifications_enabled, marketing_notifications_enabled
+        SELECT id
+        FROM reservations
+        WHERE source='legacy_booking' AND external_ref=?
+        LIMIT 1
+        """,
+        (str(rid),),
+    ).fetchone()
+    return int(mapped["id"]) if mapped else None
+
+
+def _get_public_reservation_token(conn, reservation_id: int, *, token_kind: str = "guest_access") -> str:
+    core_reservation_id = _resolve_core_reservation_id(conn, int(reservation_id))
+    if not core_reservation_id:
+        return ""
+
+    row = conn.execute(
+        """
+        SELECT public_token
+        FROM public_reservation_tokens
+        WHERE reservation_id=?
+          AND token_kind=?
+          AND status='active'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (core_reservation_id, str(token_kind or "").strip() or "guest_access"),
+    ).fetchone()
+    return str(row["public_token"] or "").strip() if row else ""
+
+
+def _load_contact_preferences(conn, phone_e164: str) -> dict[str, Any]:
+    phone = str(phone_e164 or "").strip()
+    if not phone:
+        return {
+            "preferred_channel": "",
+            "service_notifications_enabled": 1,
+            "marketing_notifications_enabled": 0,
+        }
+
+    row = conn.execute(
+        """
+        SELECT preferred_channel, service_notifications_enabled, marketing_notifications_enabled
+        FROM contacts
+        WHERE phone_e164=?
+        LIMIT 1
+        """,
+        (phone,),
+    ).fetchone()
+    if not row:
+        return {
+            "preferred_channel": "",
+            "service_notifications_enabled": 1,
+            "marketing_notifications_enabled": 0,
+        }
+    return {
+        "preferred_channel": str(row["preferred_channel"] or "").strip().lower(),
+        "service_notifications_enabled": int(row["service_notifications_enabled"] if row["service_notifications_enabled"] is not None else 1),
+        "marketing_notifications_enabled": int(row["marketing_notifications_enabled"] if row["marketing_notifications_enabled"] is not None else 0),
+    }
+
+
+def _upsert_contact_preferences(
+    conn,
+    *,
+    phone_e164: str,
+    display_name: str = "",
+    preferred_channel: str = "",
+    service_notifications_enabled: Optional[int] = None,
+    marketing_notifications_enabled: Optional[int] = None,
+) -> None:
+    phone = str(phone_e164 or "").strip()
+    if not phone:
+        return
+
+    existing = _load_contact_preferences(conn, phone)
+    preferred = str(preferred_channel or existing["preferred_channel"] or "").strip().lower() or None
+    service_enabled = (
+        int(service_notifications_enabled)
+        if service_notifications_enabled is not None
+        else int(existing["service_notifications_enabled"])
+    )
+    marketing_enabled = (
+        int(marketing_notifications_enabled)
+        if marketing_notifications_enabled is not None
+        else int(existing["marketing_notifications_enabled"])
+    )
+    name = str(display_name or "").strip()
+
+    conn.execute(
+        """
+        INSERT INTO contacts (
+            phone_e164, display_name, preferred_channel,
+            service_notifications_enabled, marketing_notifications_enabled,
+            tags_json, source, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, '[]', 'guest_binding', datetime('now'), datetime('now'))
+        ON CONFLICT(phone_e164) DO UPDATE SET
+            display_name = CASE
+                WHEN trim(COALESCE(excluded.display_name, '')) <> '' THEN excluded.display_name
+                ELSE contacts.display_name
+            END,
+            preferred_channel = COALESCE(excluded.preferred_channel, contacts.preferred_channel),
+            service_notifications_enabled = excluded.service_notifications_enabled,
+            marketing_notifications_enabled = excluded.marketing_notifications_enabled,
+            updated_at = datetime('now')
+        """,
+        (phone, name or None, preferred, service_enabled, marketing_enabled),
+    )
+
+
+def _ensure_contact_id(conn, phone_e164: str, display_name: str = "") -> Optional[int]:
+    phone = str(phone_e164 or "").strip()
+    if not phone:
+        return None
+
+    _upsert_contact_preferences(conn, phone_e164=phone, display_name=display_name)
+    row = conn.execute(
+        "SELECT id FROM contacts WHERE phone_e164=? LIMIT 1",
+        (phone,),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
+def _upsert_contact_channel(
+    conn,
+    *,
+    guest_phone_e164: str,
+    channel_type: str,
+    external_user_id: str,
+    profile_meta: Optional[dict[str, Any]] = None,
+) -> int:
+    contact_id = _ensure_contact_id(
+        conn,
+        str(guest_phone_e164 or "").strip(),
+        str((profile_meta or {}).get("external_display_name") or "").strip(),
+    )
+    meta = _normalize_profile_meta(profile_meta)
+    platform = str(channel_type or "").strip().lower()
+    external_id = str(external_user_id or "").strip()
+    external_peer_id = external_id if platform == "vk" else None
+    conn.execute(
+        """
+        INSERT INTO contact_channels (
+            contact_id, platform, channel_kind, external_user_id, external_peer_id,
+            username, display_name, status, linked_at, created_at, updated_at
+        ) VALUES (?, ?, 'user', ?, ?, ?, ?, 'active', datetime('now'), datetime('now'), datetime('now'))
+        ON CONFLICT(platform, external_user_id) DO UPDATE SET
+            contact_id = COALESCE(excluded.contact_id, contact_channels.contact_id),
+            external_peer_id = COALESCE(excluded.external_peer_id, contact_channels.external_peer_id),
+            username = CASE
+                WHEN trim(COALESCE(excluded.username, '')) <> '' THEN excluded.username
+                ELSE contact_channels.username
+            END,
+            display_name = CASE
+                WHEN trim(COALESCE(excluded.display_name, '')) <> '' THEN excluded.display_name
+                ELSE contact_channels.display_name
+            END,
+            status = 'active',
+            linked_at = datetime('now'),
+            updated_at = datetime('now')
+        """,
+        (
+            contact_id,
+            platform,
+            external_id,
+            external_peer_id,
+            meta["external_username"] or None,
+            meta["external_display_name"] or None,
+        ),
+    )
+    row = conn.execute(
+        """
+        SELECT id
+        FROM contact_channels
+        WHERE platform=? AND external_user_id=?
+        LIMIT 1
+        """,
+        (platform, external_id),
+    ).fetchone()
+    return int(row["id"]) if row else 0
+
+
+def _build_booking_token_payload(conn, booking_id: int, reservation_token: str) -> Optional[dict[str, Any]]:
+    booking = load_booking_read_model(conn, int(booking_id))
+    if not booking:
+        return None
+
+    prefs = _load_contact_preferences(conn, str(booking.get("phone_e164") or "").strip())
+    payload = dict(booking)
+    payload.update(
+        {
+            "reservation_token": str(reservation_token or "").strip(),
+            "preferred_channel": prefs["preferred_channel"],
+            "service_notifications_enabled": prefs["service_notifications_enabled"],
+            "marketing_notifications_enabled": prefs["marketing_notifications_enabled"],
+        }
+    )
+    return payload
+
+
+def _load_booking_by_reservation_token(conn, reservation_token: str):
+    token = str(reservation_token or "").strip()
+    if not token:
+        return None
+
+    core_row = conn.execute(
+        """
+        SELECT prt.reservation_id, r.external_ref
+        FROM public_reservation_tokens prt
+        JOIN reservations r ON r.id = prt.reservation_id
+        WHERE prt.public_token = ?
+          AND prt.token_kind = 'guest_access'
+          AND prt.status = 'active'
+        ORDER BY prt.id DESC
+        LIMIT 1
+        """,
+        (token,),
+    ).fetchone()
+    if core_row:
+        external_ref = str(core_row["external_ref"] or "").strip()
+        if external_ref.isdigit():
+            payload = _build_booking_token_payload(conn, int(external_ref), token)
+            if payload:
+                return payload
+
+    legacy_row = conn.execute(
+        """
+        SELECT id
         FROM bookings
         WHERE reservation_token = ?
         LIMIT 1
         """,
-        (str(reservation_token or "").strip(),),
+        (token,),
     ).fetchone()
+    if not legacy_row:
+        return None
+
+    payload = _build_booking_token_payload(conn, int(legacy_row["id"]), token)
+    if payload:
+        core_reservation_id = _resolve_core_reservation_id(conn, int(legacy_row["id"]))
+        if core_reservation_id:
+            ensure_public_reservation_token(
+                conn,
+                reservation_id=core_reservation_id,
+                public_token=token,
+            )
+        return payload
+    return None
 
 
 def _ensure_guest_profile(conn, phone_e164: str, name: str = "") -> None:
@@ -88,10 +336,7 @@ def create_binding_token(
     if ttl <= 0:
         ttl = 45
 
-    booking = conn.execute(
-        "SELECT id, reservation_token, phone_e164 FROM bookings WHERE id=?",
-        (int(reservation_id),),
-    ).fetchone()
+    booking = load_booking_read_model(conn, int(reservation_id))
     if not booking:
         raise ValueError("booking_not_found")
 
@@ -148,6 +393,31 @@ def get_reservation_by_token(conn, reservation_token: str):
 
 
 def get_guest_bindings(conn, guest_phone_e164: str) -> list[dict[str, Any]]:
+    canonical_rows = conn.execute(
+        """
+        SELECT
+            cc.id,
+            c.phone_e164 AS guest_phone_e164,
+            cc.platform AS channel_type,
+            cc.external_user_id,
+            cc.username AS external_username,
+            cc.display_name AS external_display_name,
+            cc.status,
+            1 AS is_verified,
+            cc.linked_at,
+            cc.created_at,
+            cc.updated_at
+        FROM contacts c
+        JOIN contact_channels cc
+          ON cc.contact_id = c.id
+        WHERE c.phone_e164 = ?
+        ORDER BY datetime(cc.updated_at) DESC, cc.id DESC
+        """,
+        (str(guest_phone_e164 or "").strip(),),
+    ).fetchall()
+    if canonical_rows:
+        return [dict(r) for r in canonical_rows]
+
     rows = conn.execute(
         """
         SELECT id, guest_phone_e164, channel_type, external_user_id, external_username,
@@ -162,21 +432,23 @@ def get_guest_bindings(conn, guest_phone_e164: str) -> list[dict[str, Any]]:
 
 
 def get_reservation_channel_status(conn, reservation_id: int) -> dict[str, Any]:
-    booking = conn.execute(
-        """
-        SELECT id, reservation_token, phone_e164, preferred_channel,
-               service_notifications_enabled, marketing_notifications_enabled
-        FROM bookings WHERE id = ?
-        """,
-        (int(reservation_id),),
-    ).fetchone()
+    booking = load_booking_read_model(conn, int(reservation_id))
     if not booking:
         raise ValueError("booking_not_found")
     phone = str(booking["phone_e164"] or "").strip()
+    prefs = _load_contact_preferences(conn, phone)
+    booking_state = {
+        "id": int(booking["id"]),
+        "reservation_token": _get_public_reservation_token(conn, int(reservation_id)),
+        "phone_e164": phone,
+        "preferred_channel": prefs["preferred_channel"],
+        "service_notifications_enabled": prefs["service_notifications_enabled"],
+        "marketing_notifications_enabled": prefs["marketing_notifications_enabled"],
+    }
     bindings = get_guest_bindings(conn, phone) if phone else []
     active = [b for b in bindings if str(b.get("status") or "").strip().lower() == "active"]
     return {
-        "booking": dict(booking),
+        "booking": booking_state,
         "bindings": bindings,
         "active_bindings": active,
         "by_channel": {b["channel_type"]: b for b in active},
@@ -320,10 +592,7 @@ def consume_binding_token_once(
             return {"ok": False, "error": "token_invalid"}
 
     reservation_id = int(token_row["reservation_id"])
-    booking = conn.execute(
-        "SELECT id, phone_e164, name FROM bookings WHERE id=?",
-        (reservation_id,),
-    ).fetchone()
+    booking = load_booking_read_model(conn, reservation_id)
     if not booking:
         return {"ok": False, "error": "booking_not_found"}
 
@@ -332,6 +601,20 @@ def consume_binding_token_once(
         return {"ok": False, "error": "guest_phone_missing"}
 
     _ensure_guest_profile(conn, guest_phone, str(booking["name"] or "").strip())
+    _upsert_contact_preferences(
+        conn,
+        phone_e164=guest_phone,
+        display_name=str(booking["name"] or "").strip(),
+        preferred_channel=channel,
+        service_notifications_enabled=1,
+    )
+    _upsert_contact_channel(
+        conn,
+        guest_phone_e164=guest_phone,
+        channel_type=channel,
+        external_user_id=ext_uid,
+        profile_meta=profile_meta,
+    )
     binding_id = _upsert_channel_binding(
         conn,
         guest_phone_e164=guest_phone,
@@ -339,34 +622,17 @@ def consume_binding_token_once(
         external_user_id=ext_uid,
         profile_meta=profile_meta,
     )
-    conn.execute(
-        """
-        UPDATE bookings
-        SET preferred_channel=?,
-            service_notifications_enabled=1,
-            updated_at=datetime('now')
-        WHERE id=?
-        """,
-        (channel, reservation_id),
-    )
-    conn.execute(
-        """
-        INSERT INTO booking_events (booking_id, event_type, actor_tg_id, actor_name, payload_json)
-        VALUES (?, 'GUEST_CHANNEL_BOUND', ?, ?, ?)
-        """,
-        (
-            reservation_id,
-            f"{channel}:{ext_uid}",
-            f"{channel}:{ext_uid}",
-            json.dumps(
-                {
-                    "channel_type": channel,
-                    "channel_binding_id": binding_id,
-                    "guest_phone_e164": guest_phone,
-                },
-                ensure_ascii=False,
-            ),
-        ),
+    log_booking_event(
+        conn,
+        reservation_id,
+        "GUEST_CHANNEL_BOUND",
+        f"{channel}:{ext_uid}",
+        f"{channel}:{ext_uid}",
+        {
+            "channel_type": channel,
+            "channel_binding_id": binding_id,
+            "guest_phone_e164": guest_phone,
+        },
     )
 
     log_event(

@@ -164,6 +164,7 @@ else:
 
 GUEST_COMM_ENABLED = _env_flag("GUEST_COMM_ENABLED", default=False)
 CORE_ONLY_MODE = _env_flag("CORE_ONLY_MODE", default=False)
+LEGACY_MIRROR_ENABLED = _env_flag("LEGACY_MIRROR_ENABLED", default=(not CORE_ONLY_MODE))
 GUEST_BINDING_TOKEN_TTL_MIN = int(os.getenv("GUEST_BINDING_TOKEN_TTL_MIN", "45").strip() or "45")
 GUEST_BINDING_TOKEN_PEPPER = os.getenv("GUEST_BINDING_TOKEN_PEPPER", "").strip()
 GUEST_PUBLIC_BASE_URL = os.getenv("GUEST_PUBLIC_BASE_URL", "").strip()

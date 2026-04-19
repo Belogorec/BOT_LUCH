@@ -1,6 +1,18 @@
 import sqlite3
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, col: str, ddl: str):
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if not table_exists:
+        return
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if col not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+
+
 def init_contact_schema(conn: sqlite3.Connection):
     conn.executescript(
         """
@@ -10,6 +22,9 @@ def init_contact_schema(conn: sqlite3.Connection):
           id            INTEGER PRIMARY KEY AUTOINCREMENT,
           phone_e164    TEXT UNIQUE,
           display_name  TEXT,
+          preferred_channel TEXT,
+          service_notifications_enabled INTEGER NOT NULL DEFAULT 1,
+          marketing_notifications_enabled INTEGER NOT NULL DEFAULT 0,
           tags_json     TEXT NOT NULL DEFAULT '[]',
           source        TEXT NOT NULL DEFAULT 'legacy_import',
           created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -45,4 +60,7 @@ def init_contact_schema(conn: sqlite3.Connection):
 
 def run_contact_schema_migrations(conn: sqlite3.Connection):
     init_contact_schema(conn)
+    _ensure_column(conn, "contacts", "preferred_channel", "TEXT")
+    _ensure_column(conn, "contacts", "service_notifications_enabled", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(conn, "contacts", "marketing_notifications_enabled", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()

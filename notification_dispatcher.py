@@ -2,9 +2,9 @@ import json
 from typing import Any, Optional
 
 from config import GUEST_COMM_ENABLED, GUEST_NOTIFICATION_TEST_MODE
+from integration_service import create_outbox_message
 from local_log import log_event, log_exception
-from telegram_api import tg_send_message
-from vk_api import vk_send_message
+from outbox_dispatcher import dispatch_outbox_message
 
 
 def _snapshot(payload: Optional[dict[str, Any]]) -> str:
@@ -50,17 +50,50 @@ def _log_delivery(
     return int(row["id"]) if row else 0
 
 
-def _binding_for_channel(conn, guest_phone_e164: str, channel_type: str):
-    return conn.execute(
+def _resolve_core_reservation_id(conn, reservation_id: Optional[int]) -> Optional[int]:
+    rid = int(reservation_id or 0) or None
+    if not rid:
+        return None
+
+    direct = conn.execute("SELECT id FROM reservations WHERE id=?", (rid,)).fetchone()
+    if direct:
+        return int(direct["id"])
+
+    mapped = conn.execute(
         """
-        SELECT id, guest_phone_e164, channel_type, external_user_id, external_username, external_display_name
-        FROM guest_channel_bindings
-        WHERE guest_phone_e164=? AND channel_type=? AND status='active'
-        ORDER BY datetime(updated_at) DESC, id DESC
+        SELECT id
+        FROM reservations
+        WHERE source='legacy_booking' AND external_ref=?
         LIMIT 1
         """,
-        (str(guest_phone_e164 or "").strip(), str(channel_type or "").strip()),
+        (str(rid),),
     ).fetchone()
+    return int(mapped["id"]) if mapped else None
+
+
+def _load_active_contact_channels(conn, guest_phone_e164: str):
+    return conn.execute(
+        """
+        SELECT
+            cc.id,
+            c.phone_e164 AS guest_phone_e164,
+            c.preferred_channel,
+            c.service_notifications_enabled,
+            c.marketing_notifications_enabled,
+            cc.platform AS channel_type,
+            cc.external_user_id,
+            cc.external_peer_id,
+            cc.username AS external_username,
+            cc.display_name AS external_display_name
+        FROM contacts c
+        JOIN contact_channels cc
+          ON cc.contact_id = c.id
+        WHERE c.phone_e164 = ?
+          AND cc.status = 'active'
+        ORDER BY datetime(cc.updated_at) DESC, cc.id DESC
+        """,
+        (str(guest_phone_e164 or "").strip(),),
+    ).fetchall()
 
 
 def resolve_preferred_channel(conn, *, reservation_id: Optional[int] = None, guest_phone_e164: str = "") -> dict[str, Any]:
@@ -69,43 +102,38 @@ def resolve_preferred_channel(conn, *, reservation_id: Optional[int] = None, gue
 
     phone = str(guest_phone_e164 or "").strip()
     preferred = ""
-    resolved_reservation_id = int(reservation_id or 0) or None
+    resolved_reservation_id = _resolve_core_reservation_id(conn, reservation_id)
     if reservation_id:
-        booking = conn.execute(
+        reservation = conn.execute(
             """
-            SELECT id, phone_e164, preferred_channel, service_notifications_enabled
-            FROM bookings WHERE id=?
+            SELECT id, guest_phone
+            FROM reservations
+            WHERE id=?
             """,
-            (int(reservation_id),),
+            (int(resolved_reservation_id or 0),),
         ).fetchone()
-        if not booking:
-            return {"ok": False, "error": "booking_not_found"}
-        phone = phone or str(booking["phone_e164"] or "").strip()
-        preferred = str(booking["preferred_channel"] or "").strip().lower()
-        if int(booking["service_notifications_enabled"] or 1) == 0:
-            return {"ok": False, "error": "service_notifications_disabled", "guest_phone_e164": phone}
+        if not reservation:
+            return {"ok": False, "error": "reservation_not_found"}
+        phone = phone or str(reservation["guest_phone"] or "").strip()
 
     if not phone:
         return {"ok": False, "error": "guest_phone_missing"}
 
-    bindings = conn.execute(
-        """
-        SELECT id, guest_phone_e164, channel_type, external_user_id, external_username, external_display_name
-        FROM guest_channel_bindings
-        WHERE guest_phone_e164=? AND status='active'
-        ORDER BY datetime(updated_at) DESC, id DESC
-        """,
-        (phone,),
-    ).fetchall()
+    bindings = _load_active_contact_channels(conn, phone)
     if not bindings:
         return {"ok": False, "error": "no_active_bindings", "guest_phone_e164": phone}
 
+    first_binding = dict(bindings[0])
+    if int(first_binding.get("service_notifications_enabled") or 0) == 0:
+        return {"ok": False, "error": "service_notifications_disabled", "guest_phone_e164": phone}
+
     by_channel = {str(r["channel_type"]): dict(r) for r in bindings}
+    preferred = str(first_binding.get("preferred_channel") or "").strip().lower()
     chosen = None
     if preferred and preferred in by_channel:
         chosen = by_channel[preferred]
     if chosen is None:
-        chosen = dict(bindings[0])
+        chosen = first_binding
         preferred = str(chosen["channel_type"])
 
     return {
@@ -115,26 +143,6 @@ def resolve_preferred_channel(conn, *, reservation_id: Optional[int] = None, gue
         "preferred_channel": preferred,
         "binding": chosen,
     }
-
-
-def send_service_notification_to_telegram(conn, *, binding: dict[str, Any], text: str) -> dict[str, Any]:
-    chat_id = str(binding.get("external_user_id") or "").strip()
-    if not chat_id:
-        return {"ok": False, "error": "telegram_chat_id_missing"}
-    if GUEST_NOTIFICATION_TEST_MODE:
-        return {"ok": True, "provider_message_id": "test-mode"}
-    message_id = tg_send_message(chat_id, str(text or "").strip())
-    return {"ok": True, "provider_message_id": str(message_id or "")}
-
-
-def send_service_notification_to_vk(conn, *, binding: dict[str, Any], text: str) -> dict[str, Any]:
-    peer_id = str(binding.get("external_user_id") or "").strip()
-    if not peer_id:
-        return {"ok": False, "error": "vk_peer_id_missing"}
-    if GUEST_NOTIFICATION_TEST_MODE:
-        return {"ok": True, "provider_message_id": "test-mode"}
-    resp = vk_send_message(int(peer_id), str(text or "").strip(), bot_key="guest")
-    return {"ok": True, "provider_message_id": str(resp or "")}
 
 
 def send_service_notification(
@@ -165,25 +173,42 @@ def send_service_notification(
         return resolved
 
     binding = dict(resolved["binding"])
+    resolved_reservation_id = int(resolved.get("reservation_id") or 0) or reservation_id
     channel = str(force_channel or binding.get("channel_type") or "").strip().lower()
     binding_id = int(binding.get("id") or 0) or None
     phone = str(resolved.get("guest_phone_e164") or "")
 
-    try:
-        if channel == "telegram":
-            result = send_service_notification_to_telegram(conn, binding=binding, text=text)
-        elif channel == "vk":
-            result = send_service_notification_to_vk(conn, binding=binding, text=text)
-        else:
-            result = {"ok": False, "error": "unsupported_channel"}
-    except Exception as exc:
-        log_exception("GUEST-NOTIFY", event=event_type, channel=channel, error=exc)
-        result = {"ok": False, "error": str(exc)}
+    if channel == "telegram":
+        target_external_id = str(binding.get("external_user_id") or "").strip()
+    elif channel == "vk":
+        target_external_id = str(binding.get("external_peer_id") or binding.get("external_user_id") or "").strip()
+    else:
+        target_external_id = ""
+
+    if not target_external_id:
+        result = {"ok": False, "error": "target_external_id_missing"}
+    elif GUEST_NOTIFICATION_TEST_MODE:
+        result = {"ok": True, "provider_message_id": "test-mode"}
+    else:
+        try:
+            outbox_id = create_outbox_message(
+                conn,
+                reservation_id=resolved_reservation_id,
+                platform=channel,
+                bot_scope="guest",
+                message_type="guest_service_notification",
+                payload={"text": str(text or "").strip(), "event_type": str(event_type or "").strip()},
+                target_external_id=target_external_id,
+            )
+            result = dispatch_outbox_message(conn, outbox_id)
+        except Exception as exc:
+            log_exception("GUEST-NOTIFY", event=event_type, channel=channel, error=exc)
+            result = {"ok": False, "error": str(exc)}
 
     if result.get("ok"):
         _log_delivery(
             conn,
-            reservation_id=reservation_id,
+            reservation_id=resolved_reservation_id,
             guest_phone_e164=phone,
             channel_binding_id=binding_id,
             channel_type=channel,
@@ -192,18 +217,18 @@ def send_service_notification(
             delivery_status="SENT",
             provider_message_id=str(result.get("provider_message_id") or ""),
         )
-        log_event("GUEST-NOTIFY", status="sent", event=event_type, channel=channel, reservation_id=reservation_id or "-")
+        log_event("GUEST-NOTIFY", status="sent", event=event_type, channel=channel, reservation_id=resolved_reservation_id or "-")
         return {
             "ok": True,
             "channel": channel,
-            "reservation_id": reservation_id,
+            "reservation_id": resolved_reservation_id,
             "channel_binding_id": binding_id,
             "provider_message_id": str(result.get("provider_message_id") or ""),
         }
 
     _log_delivery(
         conn,
-        reservation_id=reservation_id,
+        reservation_id=resolved_reservation_id,
         guest_phone_e164=phone,
         channel_binding_id=binding_id,
         channel_type=channel,
@@ -217,13 +242,13 @@ def send_service_notification(
         status="failed",
         event=event_type,
         channel=channel,
-        reservation_id=reservation_id or "-",
+        reservation_id=resolved_reservation_id or "-",
         error=str(result.get("error") or "send_failed"),
     )
     return {
         "ok": False,
         "error": str(result.get("error") or "send_failed"),
         "channel": channel,
-        "reservation_id": reservation_id,
+        "reservation_id": resolved_reservation_id,
         "channel_binding_id": binding_id,
     }
