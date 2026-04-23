@@ -1,8 +1,9 @@
 from integration_service import create_outbox_message, link_message_to_reservation
 from outbox_dispatcher import dispatch_outbox_message
+from typing import Optional
 
 
-def get_hostess_card_link(conn, *, reservation_id: int) -> dict | None:
+def get_hostess_card_link(conn, *, reservation_id: int) -> Optional[dict]:
     row = conn.execute(
         """
         SELECT external_chat_id, external_message_id
@@ -33,7 +34,7 @@ def dispatch_hostess_booking_card(
     reservation_id: int,
     chat_id: str,
     text: str,
-    reply_markup: dict | None = None,
+    reply_markup: Optional[dict] = None,
     message_id: str = "",
 ) -> dict:
     payload = {"text": str(text or "").strip()}

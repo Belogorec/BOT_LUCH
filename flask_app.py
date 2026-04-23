@@ -1,12 +1,13 @@
 import re
 import hashlib
 import hmac
+import uuid
 from datetime import datetime
 
 import json
 import urllib.parse
 
-from flask import Flask, request
+from flask import Flask, g, request
 
 from application import execute_telegram_miniapp_booking
 from contact_schema import run_contact_schema_migrations
@@ -17,7 +18,13 @@ from dashboard_api import (
     admin_api_load_impl,
 )
 from integration_schema import run_integration_schema_migrations
-from config import BOT_TOKEN, find_vk_bot_config_by_group_id
+from config import (
+    BOT_TOKEN,
+    CRM_SYNC_SHARED_SECRET,
+    DASHBOARD_CORS_ORIGINS,
+    PUBLIC_CORS_ORIGINS,
+    find_vk_bot_config_by_group_id,
+)
 from db import connect, run_migrations, seed_discount_codes_from_csv
 from local_log import log_event, log_exception
 from hostess_card_delivery import get_hostess_card_link
@@ -44,6 +51,12 @@ from booking_service import (
 from waiter_notify import notify_waiters_about_deposit_booking
 
 app = Flask(__name__)
+
+
+@app.before_request
+def _assign_request_id() -> None:
+    incoming = str(request.headers.get("X-Request-ID") or "").strip()
+    g.request_id = incoming or uuid.uuid4().hex
 
 # phone normalization
 try:
@@ -104,9 +117,8 @@ def ensure_db():
 
 
 def _crm_sync_authorized(req) -> bool:
-    payload = req.get_json(silent=True) or {}
-    incoming = str(req.headers.get("X-Bot-Token") or payload.get("bot_token") or "").strip()
-    return bool(BOT_TOKEN) and incoming == BOT_TOKEN
+    incoming = str(req.headers.get("X-CRM-Sync-Secret") or "").strip()
+    return bool(CRM_SYNC_SHARED_SECRET) and incoming == CRM_SYNC_SHARED_SECRET
 
 
 def _resolve_vk_callback_bot(payload: dict, *, require_secret: bool = True) -> dict:
@@ -1064,28 +1076,11 @@ def public_api_guest_lookup():
     if request.method == "OPTIONS":
         return ("", 204)
 
-    phone_raw = (request.args.get("phone") or "").strip()
-    phone_e164 = normalize_phone_e164(phone_raw, default_region="RU")
-    if not phone_e164:
-        return {"ok": True, "found": False}
-
-    conn = ensure_db()
-    try:
-        row = conn.execute(
-            "SELECT name_last FROM guests WHERE phone_e164=?",
-            (phone_e164,),
-        ).fetchone()
-        name_last = (row["name_last"] or "").strip() if row else ""
-        if name_last:
-            return {
-                "ok": True,
-                "found": True,
-                "phone_e164": phone_e164,
-                "name": name_last,
-            }
-        return {"ok": True, "found": False, "phone_e164": phone_e164}
-    finally:
-        conn.close()
+    return {
+        "ok": False,
+        "error": "guest_lookup_disabled",
+        "message": "Public guest lookup by phone is disabled.",
+    }, 410
 
 
 
@@ -1151,10 +1146,25 @@ def api_submit_booking():
 
 @app.after_request
 def _admin_api_cors(resp):
-    if request.path.startswith("/admin/api/") or request.path.startswith("/public/api/"):
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    request_id = getattr(g, "request_id", "")
+    if request_id:
+        resp.headers["X-Request-ID"] = request_id
+    allowed_origins = []
+    if request.path.startswith("/admin/api/"):
+        allowed_origins = DASHBOARD_CORS_ORIGINS
+        allowed_methods = "GET, POST, OPTIONS"
+    elif request.path.startswith("/public/api/"):
+        allowed_origins = PUBLIC_CORS_ORIGINS
+        allowed_methods = "GET, OPTIONS"
+    else:
+        allowed_methods = ""
+
+    origin = request.headers.get("Origin", "")
+    if allowed_origins and origin in allowed_origins:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Methods"] = allowed_methods
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Dashboard-Key, X-CRM-Sync-Secret"
     return resp
 
 

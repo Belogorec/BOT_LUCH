@@ -11,7 +11,7 @@ def ensure_db():
 
 
 def require_dashboard_key():
-    key = (request.args.get("key") or "").strip()
+    key = (request.headers.get("X-Dashboard-Key") or "").strip()
     if not DASHBOARD_SECRET or key != DASHBOARD_SECRET:
         abort(403)
 

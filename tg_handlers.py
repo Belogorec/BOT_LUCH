@@ -17,6 +17,7 @@ from config import (
     WAITER_CHAT_ID,
     BOT_TOKEN,
     CRM_AUTH_CONFIRM_URL,
+    CRM_AUTH_SHARED_SECRET,
     CRM_AUTH_TIMEOUT_SEC,
 )
 from telegram_api import (
@@ -79,8 +80,8 @@ def _normalize_auth_code(raw: str) -> str:
 def _confirm_crm_auth(code: str, telegram_id: str) -> tuple[bool, str]:
     if not CRM_AUTH_CONFIRM_URL:
         return False, "CRM auth URL не настроен"
-    if not BOT_TOKEN:
-        return False, "BOT_TOKEN не настроен"
+    if not CRM_AUTH_SHARED_SECRET:
+        return False, "CRM auth shared secret не настроен"
 
     try:
         resp = requests.post(
@@ -88,8 +89,8 @@ def _confirm_crm_auth(code: str, telegram_id: str) -> tuple[bool, str]:
             json={
                 "code": code,
                 "telegram_id": int(telegram_id),
-                "bot_token": BOT_TOKEN,
             },
+            headers={"X-CRM-Auth-Secret": CRM_AUTH_SHARED_SECRET},
             timeout=max(3, int(CRM_AUTH_TIMEOUT_SEC)),
         )
     except Exception as exc:
@@ -320,6 +321,7 @@ def tg_webhook_impl():
     )
 
     conn = ensure_db()
+    should_commit = True
     try:
         if isinstance(update_id, int):
             conn.execute(
@@ -1759,6 +1761,11 @@ def tg_webhook_impl():
 
         return {"ok": True}
     except Exception as e:
+        should_commit = False
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         print(
             "[TG-WEBHOOK] ERROR "
             f"update_id={update_id} "
@@ -1772,5 +1779,6 @@ def tg_webhook_impl():
         print(traceback.format_exc(), flush=True)
         return {"ok": True}
     finally:
-        conn.commit()
+        if should_commit:
+            conn.commit()
         conn.close()

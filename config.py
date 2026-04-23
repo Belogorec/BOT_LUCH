@@ -57,15 +57,27 @@ WAITER_CHAT_ID = os.getenv("WAITER_CHAT_ID", os.getenv("WAITERS_CHAT_ID", "-1001
 TILDA_SECRET = os.getenv("TILDA_SECRET", "").strip()
 TG_WEBHOOK_SECRET = os.getenv("TG_WEBHOOK_SECRET", "").strip()
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "").strip()
+DASHBOARD_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("DASHBOARD_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+PUBLIC_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("PUBLIC_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
 ANALYTICS_TZ_OFFSET_HOURS = int(os.getenv("ANALYTICS_TZ_OFFSET_HOURS", "3").strip() or "3")
 BUSINESS_TZ_OFFSET_HOURS = int(os.getenv("BUSINESS_TZ_OFFSET_HOURS", str(ANALYTICS_TZ_OFFSET_HOURS)).strip() or str(ANALYTICS_TZ_OFFSET_HOURS))
 CRM_API_URL = os.getenv("CRM_API_URL", "").strip()
 CRM_API_KEY = os.getenv("CRM_API_KEY", "").strip()
+CRM_SYNC_SHARED_SECRET = os.getenv("CRM_SYNC_SHARED_SECRET", "").strip()
 CRM_SYNC_TIMEOUT = int(os.getenv("CRM_SYNC_TIMEOUT", "8").strip() or "8")
 CRM_AUTH_CONFIRM_URL = os.getenv(
     "CRM_AUTH_CONFIRM_URL",
     "https://luchcrm-production.up.railway.app/api/auth/confirm-code",
 ).strip()
+CRM_AUTH_SHARED_SECRET = os.getenv("CRM_AUTH_SHARED_SECRET", CRM_SYNC_SHARED_SECRET).strip()
 CRM_AUTH_TIMEOUT_SEC = int(os.getenv("CRM_AUTH_TIMEOUT_SEC", "8").strip() or "8")
 VK_HOSTESS_GROUP_ID = os.getenv("VK_HOSTESS_GROUP_ID", os.getenv("VK_GROUP_ID", "")).strip()
 VK_HOSTESS_ACCESS_TOKEN = os.getenv("VK_HOSTESS_ACCESS_TOKEN", os.getenv("VK_ACCESS_TOKEN", "")).strip()

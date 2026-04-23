@@ -13,9 +13,13 @@ cd repos/BOT_LUCH
 python3 verify_mirror_off.py
 python3 verify_mirror_off.py --strict
 python3 verify_mirror_off.py --db-path /path/to/prod-copy.db --strict
+python3 backfill_reservation_events.py --db-path /path/to/prod-copy.db --dry-run
+python3 backfill_reservation_events.py --db-path /path/to/prod-copy.db
 ```
 
 Если runtime `DB_PATH` в локальном env указывает на недоступный путь вроде `/data/...`, для pre-deploy dry run лучше использовать снятую копию рабочей БД через `--db-path`.
+
+На текущем production-copy был обнаружен исторический хвост: 5 legacy-sourced `reservations` без `reservation_events`. После прогона `backfill_reservation_events.py` на копии БД `verify_mirror_off.py --db-path ... --strict` проходит полностью зелёным.
 
 ## What The Script Checks
 

@@ -1,14 +1,11 @@
 import json
-import time
+import hashlib
 import traceback
 from typing import Any, Optional
 
-import requests
-
 from booking_service import load_booking_read_model, load_table_read_model
-from config import CRM_API_KEY, CRM_API_URL, CRM_SYNC_TIMEOUT
-
-_session = requests.Session()
+from config import CRM_API_URL
+from integration_service import create_outbox_message
 
 
 def crm_sync_enabled() -> bool:
@@ -19,6 +16,11 @@ def _row_to_dict(row) -> dict[str, Any]:
     if not row:
         return {}
     return {k: row[k] for k in row.keys()}
+
+
+def _payload_fingerprint(payload: dict[str, Any]) -> str:
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _build_payload(conn, booking_id: int, event_name: str, meta: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -78,6 +80,7 @@ def _build_payload(conn, booking_id: int, event_name: str, meta: Optional[dict[s
     }
     if table_payload:
         payload["table"] = table_payload
+    payload["external_event_id"] = f"booking:{booking_id}:{event_name}:{_payload_fingerprint(payload)}"
     return payload
 
 
@@ -94,12 +97,14 @@ def _build_table_payload(conn, table_number: str, event_name: str, meta: Optiona
     table_payload = load_table_read_model(conn, str(table_number))
     if not table_payload:
         raise ValueError("table_not_found")
-    return {
+    payload = {
         "event": event_name,
         "source": "luchbarbot",
         "table": table_payload,
         "meta": meta or {},
     }
+    payload["external_event_id"] = f"table:{table_number}:{event_name}:{_payload_fingerprint(payload)}"
+    return payload
 
 
 def send_booking_event(conn, booking_id: int, event_name: str, meta: Optional[dict[str, Any]] = None) -> bool:
@@ -112,34 +117,16 @@ def send_booking_event(conn, booking_id: int, event_name: str, meta: Optional[di
         traceback.print_exc()
         return False
 
-    headers = {"Content-Type": "application/json"}
-    if CRM_API_KEY:
-        headers["X-CRM-API-Key"] = CRM_API_KEY
-
-    max_attempts = 3
-    timeout = max(3, int(CRM_SYNC_TIMEOUT))
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = _session.post(
-                CRM_API_URL,
-                json=payload,
-                headers=headers,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            return True
-        except Exception as exc:
-            print(
-                f"[CRM_SYNC] booking_id={booking_id} event={event_name} "
-                f"attempt={attempt}/{max_attempts} failed: {exc}",
-                flush=True,
-            )
-            traceback.print_exc()
-            if attempt < max_attempts:
-                time.sleep(attempt)
-
-    return False
+    create_outbox_message(
+        conn,
+        reservation_id=None,
+        platform="http",
+        bot_scope="crm_sync",
+        target_external_id=CRM_API_URL,
+        message_type=f"crm_booking:{event_name}",
+        payload=payload,
+    )
+    return True
 
 
 def send_table_event(conn, table_number: str, event_name: str, meta: Optional[dict[str, Any]] = None) -> bool:
@@ -152,31 +139,13 @@ def send_table_event(conn, table_number: str, event_name: str, meta: Optional[di
         traceback.print_exc()
         return False
 
-    headers = {"Content-Type": "application/json"}
-    if CRM_API_KEY:
-        headers["X-CRM-API-Key"] = CRM_API_KEY
-
-    max_attempts = 3
-    timeout = max(3, int(CRM_SYNC_TIMEOUT))
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = _session.post(
-                CRM_API_URL,
-                json=payload,
-                headers=headers,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            return True
-        except Exception as exc:
-            print(
-                f"[CRM_SYNC] table_number={table_number} event={event_name} "
-                f"attempt={attempt}/{max_attempts} failed: {exc}",
-                flush=True,
-            )
-            traceback.print_exc()
-            if attempt < max_attempts:
-                time.sleep(attempt)
-
-    return False
+    create_outbox_message(
+        conn,
+        reservation_id=None,
+        platform="http",
+        bot_scope="crm_sync",
+        target_external_id=CRM_API_URL,
+        message_type=f"crm_table:{event_name}",
+        payload=payload,
+    )
+    return True

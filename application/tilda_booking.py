@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, Optional
 
 from booking_render import render_booking_card
 from booking_service import (
@@ -27,7 +27,7 @@ def execute_tilda_booking_webhook(
     phone_e164: str,
     date_raw: str,
     time_raw: str,
-    guests_count: int | None,
+    guests_count: Optional[int],
     comment: str,
     tranid: str,
     formname: str,
