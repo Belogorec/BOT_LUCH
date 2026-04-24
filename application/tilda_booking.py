@@ -100,6 +100,7 @@ def execute_tilda_booking_webhook(
                 "actor_name": "tilda",
                 "payload": {"source": "tilda", "tg_status": tg_status},
             },
+            dispatch_now=True,
         )
         if not sync_ok:
             log_booking_event(

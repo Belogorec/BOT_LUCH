@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 import booking_service
 import channel_binding_service
+import crm_sync
+import outbox_dispatcher
 import waiter_notify
 from application import miniapp_booking, tilda_booking
 from contact_schema import run_contact_schema_migrations
@@ -23,11 +25,13 @@ class MirrorOffSmokeTests(unittest.TestCase):
         self.prev_waiter_chat_id = waiter_notify.WAITER_CHAT_ID
         self.prev_miniapp_tg_chat_id = miniapp_booking.TG_CHAT_ID
         self.prev_tilda_tg_chat_id = tilda_booking.TG_CHAT_ID
+        self.prev_crm_api_url = crm_sync.CRM_API_URL
 
         booking_service.LEGACY_MIRROR_ENABLED = False
         waiter_notify.WAITER_CHAT_ID = "waiter-smoke-chat"
         miniapp_booking.TG_CHAT_ID = "hostess-smoke-chat"
         tilda_booking.TG_CHAT_ID = "hostess-smoke-chat"
+        crm_sync.CRM_API_URL = "https://crm.example/api/events"
 
         conn = self._connect()
         try:
@@ -44,6 +48,7 @@ class MirrorOffSmokeTests(unittest.TestCase):
         waiter_notify.WAITER_CHAT_ID = self.prev_waiter_chat_id
         miniapp_booking.TG_CHAT_ID = self.prev_miniapp_tg_chat_id
         tilda_booking.TG_CHAT_ID = self.prev_tilda_tg_chat_id
+        crm_sync.CRM_API_URL = self.prev_crm_api_url
         try:
             os.unlink(self.tmp.name)
         except FileNotFoundError:
@@ -177,6 +182,51 @@ class MirrorOffSmokeTests(unittest.TestCase):
         self.assertEqual(payload["phone_e164"], "+79000003002")
         self.assertEqual(payload["formname"], "Tilda Smoke")
         self.assertEqual(payload["reservation_token"], token_row["public_token"])
+
+    def test_tilda_booking_dispatches_crm_sync_immediately(self):
+        conn = self._connect()
+        original_dispatch_http = outbox_dispatcher._dispatch_http_post
+        outbox_dispatcher._dispatch_http_post = lambda target, payload: "200"
+        try:
+            with patch.object(tilda_booking, "dispatch_hostess_booking_card", return_value={"ok": True, "provider_message_id": "602"}), \
+                 patch.object(tilda_booking, "notify_vk_staff_about_new_booking", return_value=0):
+                result = tilda_booking.execute_tilda_booking_webhook(
+                    conn,
+                    payload={"source": "tilda-sync-smoke"},
+                    name="Петр",
+                    phone_raw="+7 (900) 000-30-12",
+                    phone_e164="+79000003012",
+                    date_raw="2026-05-22",
+                    time_raw="21:15",
+                    guests_count=2,
+                    comment="CRM sync smoke",
+                    tranid="smoke-tran-32",
+                    formname="Tilda Sync Smoke",
+                    utm_source="tilda",
+                    utm_medium="site",
+                    utm_campaign="camp",
+                    utm_content="content",
+                    utm_term="term",
+                )
+            conn.commit()
+            outbox_row = conn.execute(
+                """
+                SELECT delivery_status, attempts, last_error
+                FROM bot_outbox
+                WHERE platform = 'http' AND bot_scope = 'crm_sync'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            outbox_dispatcher._dispatch_http_post = original_dispatch_http
+            conn.close()
+
+        self.assertTrue(result["ok"])
+        self.assertIsNotNone(outbox_row)
+        self.assertEqual(outbox_row["delivery_status"], "sent")
+        self.assertEqual(int(outbox_row["attempts"]), 1)
+        self.assertIsNone(outbox_row["last_error"])
 
     def test_manual_booking_deposit_flow_notifies_waiters_without_legacy_booking_mirror(self):
         conn = self._connect()

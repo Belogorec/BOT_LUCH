@@ -107,7 +107,14 @@ def _build_table_payload(conn, table_number: str, event_name: str, meta: Optiona
     return payload
 
 
-def send_booking_event(conn, booking_id: int, event_name: str, meta: Optional[dict[str, Any]] = None) -> bool:
+def send_booking_event(
+    conn,
+    booking_id: int,
+    event_name: str,
+    meta: Optional[dict[str, Any]] = None,
+    *,
+    dispatch_now: bool = False,
+) -> bool:
     if not CRM_API_URL:
         return False
 
@@ -117,7 +124,7 @@ def send_booking_event(conn, booking_id: int, event_name: str, meta: Optional[di
         traceback.print_exc()
         return False
 
-    create_outbox_message(
+    outbox_id = create_outbox_message(
         conn,
         reservation_id=None,
         platform="http",
@@ -126,10 +133,25 @@ def send_booking_event(conn, booking_id: int, event_name: str, meta: Optional[di
         message_type=f"crm_booking:{event_name}",
         payload=payload,
     )
+    if dispatch_now:
+        try:
+            from outbox_dispatcher import dispatch_outbox_message
+
+            return bool(dispatch_outbox_message(conn, outbox_id).get("ok"))
+        except Exception:
+            traceback.print_exc()
+            return False
     return True
 
 
-def send_table_event(conn, table_number: str, event_name: str, meta: Optional[dict[str, Any]] = None) -> bool:
+def send_table_event(
+    conn,
+    table_number: str,
+    event_name: str,
+    meta: Optional[dict[str, Any]] = None,
+    *,
+    dispatch_now: bool = False,
+) -> bool:
     if not CRM_API_URL:
         return False
 
@@ -139,7 +161,7 @@ def send_table_event(conn, table_number: str, event_name: str, meta: Optional[di
         traceback.print_exc()
         return False
 
-    create_outbox_message(
+    outbox_id = create_outbox_message(
         conn,
         reservation_id=None,
         platform="http",
@@ -148,4 +170,12 @@ def send_table_event(conn, table_number: str, event_name: str, meta: Optional[di
         message_type=f"crm_table:{event_name}",
         payload=payload,
     )
+    if dispatch_now:
+        try:
+            from outbox_dispatcher import dispatch_outbox_message
+
+            return bool(dispatch_outbox_message(conn, outbox_id).get("ok"))
+        except Exception:
+            traceback.print_exc()
+            return False
     return True

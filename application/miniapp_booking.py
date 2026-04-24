@@ -113,6 +113,7 @@ def execute_telegram_miniapp_booking(
                 "actor_name": saved_name or "telegram_miniapp_api",
                 "payload": {"source": "telegram_miniapp_api"},
             },
+            dispatch_now=True,
         )
         if not sync_ok:
             log_booking_event(
