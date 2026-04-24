@@ -1,6 +1,8 @@
 from datetime import datetime
 import sqlite3
 
+from core_write_guards import delete_table_block, release_assignment, update_reservation
+
 
 LEGACY_BOOKING_SOURCE = "legacy_booking"
 LEGACY_BLOCK_TYPE = "legacy_sync"
@@ -53,6 +55,13 @@ def _ensure_table(conn: sqlite3.Connection, table_code: str) -> int:
 
 
 def sync_booking_to_core(conn: sqlite3.Connection, booking_id: int) -> int:
+    direct_reservation = conn.execute(
+        "SELECT id FROM reservations WHERE id = ? LIMIT 1",
+        (int(booking_id),),
+    ).fetchone()
+    if direct_reservation:
+        return int(direct_reservation["id"])
+
     booking = conn.execute(
         """
         SELECT
@@ -106,10 +115,11 @@ def sync_booking_to_core(conn: sqlite3.Connection, booking_id: int) -> int:
         external_ref,
     )
     if reservation:
-        conn.execute(
-            """
-            UPDATE reservations
-            SET guest_name = ?,
+        update_reservation(
+            conn,
+            int(reservation["id"]),
+            set_sql="""
+                guest_name = ?,
                 guest_phone = ?,
                 reservation_at = ?,
                 party_size = ?,
@@ -119,11 +129,10 @@ def sync_booking_to_core(conn: sqlite3.Connection, booking_id: int) -> int:
                 deposit_set_at = ?,
                 deposit_set_by = ?,
                 status = ?,
-                created_at = ?,
-                updated_at = ?
-            WHERE source = ? AND external_ref = ?
+                created_at = ?
             """,
-            params,
+            params=params[:11],
+            missing_error_code="reservation_not_found_after_upsert",
         )
     else:
         conn.execute(
@@ -169,6 +178,7 @@ def sync_booking_assignment_to_core(conn: sqlite3.Connection, booking_id: int) -
     active_assignment = conn.execute(
         """
         SELECT id, table_id
+             , version
         FROM reservation_tables
         WHERE reservation_id = ? AND released_at IS NULL
         ORDER BY id DESC
@@ -179,10 +189,7 @@ def sync_booking_assignment_to_core(conn: sqlite3.Connection, booking_id: int) -
 
     if not table_code:
         if active_assignment:
-            conn.execute(
-                "UPDATE reservation_tables SET released_at = datetime('now') WHERE id = ?",
-                (int(active_assignment["id"]),),
-            )
+            release_assignment(conn, int(active_assignment["id"]), expected_version=int(active_assignment["version"] or 1))
         return
 
     table_id = _ensure_table(conn, table_code)
@@ -190,10 +197,7 @@ def sync_booking_assignment_to_core(conn: sqlite3.Connection, booking_id: int) -
         return
 
     if active_assignment:
-        conn.execute(
-            "UPDATE reservation_tables SET released_at = datetime('now') WHERE id = ?",
-            (int(active_assignment["id"]),),
-        )
+        release_assignment(conn, int(active_assignment["id"]), expected_version=int(active_assignment["version"] or 1))
 
     conn.execute(
         """
@@ -210,10 +214,17 @@ def sync_table_to_core(conn: sqlite3.Connection, table_number: str) -> None:
         return
 
     table_id = _ensure_table(conn, code)
-    conn.execute(
-        "DELETE FROM table_blocks WHERE table_id = ? AND block_type = ?",
+    block_rows = conn.execute(
+        """
+        SELECT id, version
+        FROM table_blocks
+        WHERE table_id = ? AND block_type = ?
+        ORDER BY id ASC
+        """,
         (table_id, LEGACY_BLOCK_TYPE),
-    )
+    ).fetchall()
+    for row in block_rows:
+        delete_table_block(conn, int(row["id"]), expected_version=int(row["version"] or 1))
 
     row = conn.execute(
         """

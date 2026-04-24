@@ -6,6 +6,12 @@ import re
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
+from integration_service import mark_inbound_event_processed, record_inbound_event
+
+
+BOOKING_DIALOG_EVENT_TYPE = "telegram_booking_dialog_state"
+BOOKING_QUESTION_EVENT_TYPE = "telegram_booking_question"
+
 # Состояния диалога
 STATE_AWAITING_NAME = "dialog:awaiting_name"
 STATE_AWAITING_PHONE = "dialog:awaiting_phone"
@@ -19,6 +25,25 @@ STATE_AWAITING_CONTACT = "dialog:awaiting_contact"
 
 # Состояние для вопросов
 STATE_AWAITING_QUESTION = "dialog:awaiting_question"
+
+
+def _mark_active_dialog_events(conn, *, event_type: str, chat_id: str, user_id: str, status: str, error_text: str = "") -> None:
+    rows = conn.execute(
+        """
+        SELECT id
+        FROM bot_inbound_events
+        WHERE platform = 'telegram'
+          AND bot_scope = 'hostess'
+          AND event_type = ?
+          AND actor_external_id = ?
+          AND peer_external_id = ?
+          AND processing_status = 'pending'
+        ORDER BY id ASC
+        """,
+        (str(event_type or ""), str(user_id or ""), str(chat_id or "")),
+    ).fetchall()
+    for row in rows:
+        mark_inbound_event_processed(conn, int(row["id"]), status=status, error_text=error_text)
 
 
 def normalize_phone(phone_raw: str) -> Optional[str]:
@@ -341,15 +366,39 @@ def save_dialog_state(
     """Сохраняет состояние диалога."""
     expires = (datetime.utcnow() + timedelta(hours=1)).isoformat(timespec="seconds")
 
-    # Сохраняем всё данные в phone_e164 как JSON (переиспользуем колонку для хранилища)
-    dialog_json = json.dumps({"state": state, **data}, ensure_ascii=False)
-
+    _mark_active_dialog_events(
+        conn,
+        chat_id=chat_id,
+        user_id=user_id,
+        event_type=BOOKING_DIALOG_EVENT_TYPE,
+        status="superseded",
+        error_text="replaced_by_newer_state",
+    )
+    event_id = record_inbound_event(
+        conn,
+        platform="telegram",
+        bot_scope="hostess",
+        event_type=BOOKING_DIALOG_EVENT_TYPE,
+        payload={
+            "state": state,
+            **(data or {}),
+            "prompt_message_id": str(prompt_message_id or ""),
+            "expires_at": expires,
+        },
+        actor_external_id=str(user_id or ""),
+        actor_display_name="",
+        peer_external_id=str(chat_id or ""),
+        reservation_id=None,
+    )
     conn.execute(
         """
-        INSERT INTO pending_replies (kind, booking_id, phone_e164, chat_id, actor_tg_id, prompt_message_id, expires_at)
-        VALUES ('booking_dialog', 0, ?, ?, ?, ?, ?)
+        UPDATE bot_inbound_events
+        SET processing_status = 'pending',
+            error_text = NULL,
+            processed_at = NULL
+        WHERE id = ?
         """,
-        (dialog_json, chat_id, user_id, prompt_message_id, expires),
+        (int(event_id),),
     )
 
 
@@ -360,31 +409,43 @@ def get_dialog_state(
     prompt_message_id: Optional[str] = None
 ) -> Optional[Tuple[str, dict]]:
     """Получает сохраненное состояние диалога."""
-    where = "chat_id=? AND actor_tg_id=? AND kind='booking_dialog'"
-    params = [chat_id, user_id]
-
-    if prompt_message_id:
-        where += " AND prompt_message_id=?"
-        params.append(prompt_message_id)
-
     row = conn.execute(
-        f"SELECT phone_e164, expires_at FROM pending_replies WHERE {where} ORDER BY id DESC LIMIT 1",
-        params
+        """
+        SELECT id, payload_json
+        FROM bot_inbound_events
+        WHERE platform = 'telegram'
+          AND bot_scope = 'hostess'
+          AND event_type = ?
+          AND actor_external_id = ?
+          AND peer_external_id = ?
+          AND processing_status = 'pending'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (BOOKING_DIALOG_EVENT_TYPE, str(user_id or ""), str(chat_id or "")),
     ).fetchone()
 
     if not row:
         return None
 
     try:
-        exp = datetime.fromisoformat(str(row["expires_at"]))
-        if datetime.utcnow() > exp:
+        data = json.loads(row["payload_json"] or "{}")
+        if not isinstance(data, dict):
             return None
 
-        # phone_e164 содержит JSON с данными диалога
-        data = json.loads(row["phone_e164"] or "{}")
+        if prompt_message_id and str(data.get("prompt_message_id") or "") != str(prompt_message_id):
+            return None
+
+        exp = datetime.fromisoformat(str(data.get("expires_at") or ""))
+        if datetime.utcnow() > exp:
+            mark_inbound_event_processed(conn, int(row["id"]), status="expired", error_text="expired_before_use")
+            return None
+
         state = data.pop("state", None)
         if not state:
             return None
+        data.pop("prompt_message_id", None)
+        data.pop("expires_at", None)
         return state, data
     except (json.JSONDecodeError, ValueError):
         return None
@@ -392,9 +453,12 @@ def get_dialog_state(
 
 def clear_dialog_state(conn, chat_id: str, user_id: str):
     """Очищает состояние диалога."""
-    conn.execute(
-        "DELETE FROM pending_replies WHERE chat_id=? AND actor_tg_id=? AND kind='booking_dialog'",
-        (chat_id, user_id),
+    _mark_active_dialog_events(
+        conn,
+        chat_id=chat_id,
+        user_id=user_id,
+        event_type=BOOKING_DIALOG_EVENT_TYPE,
+        status="processed",
     )
 
 
@@ -409,10 +473,37 @@ def ask_question(chat_id: str, user_id: str) -> Tuple[str, dict]:
 
 def save_booking_question(conn, booking_id: int, phone_e164: str, question: str, chat_id: str, user_id: str):
     """Сохраняет вопрос о бронировании."""
+    _mark_active_dialog_events(
+        conn,
+        chat_id=chat_id,
+        user_id=user_id,
+        event_type=BOOKING_QUESTION_EVENT_TYPE,
+        status="superseded",
+        error_text="replaced_by_newer_question",
+    )
+    event_id = record_inbound_event(
+        conn,
+        platform="telegram",
+        bot_scope="hostess",
+        event_type=BOOKING_QUESTION_EVENT_TYPE,
+        payload={
+            "question": str(question or "").strip(),
+            "guest_phone_e164": str(phone_e164 or "").strip(),
+            "booking_id": int(booking_id or 0),
+            "expires_at": (datetime.utcnow() + timedelta(days=7)).isoformat(timespec="seconds"),
+        },
+        actor_external_id=str(user_id or ""),
+        actor_display_name="",
+        peer_external_id=str(chat_id or ""),
+        reservation_id=None,
+    )
     conn.execute(
         """
-        INSERT INTO pending_replies (kind, booking_id, phone_e164, chat_id, actor_tg_id, expires_at)
-        VALUES ('booking_question', ?, ?, ?, ?, datetime('now', '+7 day'))
+        UPDATE bot_inbound_events
+        SET processing_status = 'pending',
+            error_text = NULL,
+            processed_at = NULL
+        WHERE id = ?
         """,
-        (booking_id, question, chat_id, user_id),
+        (int(event_id),),
     )

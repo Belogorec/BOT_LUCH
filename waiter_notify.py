@@ -1,7 +1,7 @@
 import html
 from typing import Optional
 
-from booking_service import load_booking_read_model
+from booking_service import load_booking_read_model, resolve_core_reservation_id
 from config import WAITER_CHAT_ID
 from integration_service import create_outbox_message
 from local_log import log_event
@@ -13,6 +13,9 @@ def _h(value: object) -> str:
 
 
 def _load_waiter_booking_row_core(conn, booking_id: int):
+    resolved_reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
+    if not resolved_reservation_id:
+        return None
     return conn.execute(
         """
         SELECT
@@ -33,11 +36,11 @@ def _load_waiter_booking_row_core(conn, booking_id: int):
          AND rt.released_at IS NULL
         LEFT JOIN tables_core tc
           ON tc.id = rt.table_id
-        WHERE r.source = 'legacy_booking' AND r.external_ref = ?
+        WHERE r.id = ?
         ORDER BY rt.id DESC
         LIMIT 1
         """,
-        (str(int(booking_id)),),
+        (int(resolved_reservation_id),),
     ).fetchone()
 
 
@@ -121,16 +124,7 @@ def notify_waiters_about_deposit_booking(conn, booking_id: int) -> bool:
 
     delivered = False
     if has_waiter_tg:
-        core_row = conn.execute(
-            """
-            SELECT id
-            FROM reservations
-            WHERE source='legacy_booking' AND external_ref=?
-            LIMIT 1
-            """,
-            (str(int(booking_id)),),
-        ).fetchone()
-        core_reservation_id = int(core_row["id"]) if core_row else None
+        core_reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
         log_event(
             "WAITER-NOTIFY",
             status="send",

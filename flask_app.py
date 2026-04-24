@@ -42,6 +42,7 @@ from booking_service import (
     create_manual_booking,
     load_booking_read_model,
     normalize_table_number,
+    resolve_core_reservation_id,
     reschedule_booking,
     set_booking_status,
     set_booking_deposit,
@@ -139,18 +140,10 @@ def _resolve_vk_callback_bot(payload: dict, *, require_secret: bool = True) -> d
 
 
 def _refresh_admin_booking_card(conn, booking_id: int) -> None:
-    reservation_row = conn.execute(
-        """
-        SELECT id
-        FROM reservations
-        WHERE source='legacy_booking' AND external_ref=?
-        LIMIT 1
-        """,
-        (str(int(booking_id)),),
-    ).fetchone()
-    if not reservation_row:
+    reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
+    if not reservation_id:
         return
-    link = get_hostess_card_link(conn, reservation_id=int(reservation_row["id"]))
+    link = get_hostess_card_link(conn, reservation_id=int(reservation_id))
     if not link or not link["chat_id"] or not link["message_id"]:
         return
     text, kb = render_booking_card(conn, booking_id)

@@ -10,8 +10,9 @@ from core_sync import (
     sync_booking_to_core,
     sync_table_state_to_core,
 )
+from core_write_guards import delete_table_block, release_assignment, update_reservation
 from db import get_tags, set_tags
-from config import BUSINESS_TZ_OFFSET_HOURS, LEGACY_MIRROR_ENABLED
+from config import BUSINESS_TZ_OFFSET_HOURS, CORE_ONLY_MODE, LEGACY_MIRROR_ENABLED
 from domain import AssignTable, ClearDeposit, ClearTable, CreateReservation, DomainValidationError, SetDeposit
 
 TABLE_LABELS = {"NONE", "DEPOSIT", "RESTRICTED"}
@@ -233,14 +234,42 @@ def _core_status_to_legacy(status: str) -> str:
     }.get(normalized, "WAITING")
 
 
-def _ensure_core_reservation_id_for_booking(conn, booking_id: int) -> int:
-    row = conn.execute(
-        "SELECT id FROM reservations WHERE source=? AND external_ref=?",
-        (LEGACY_BOOKING_SOURCE, str(int(booking_id))),
+def resolve_core_reservation_id(conn, reservation_or_booking_id: int, *, allow_booking_sync: bool = False) -> Optional[int]:
+    rid = int(reservation_or_booking_id or 0)
+    if rid <= 0:
+        return None
+
+    direct = conn.execute("SELECT id FROM reservations WHERE id=?", (rid,)).fetchone()
+    if direct:
+        return int(direct["id"])
+
+    mapped = conn.execute(
+        """
+        SELECT id
+        FROM reservations
+        WHERE trim(COALESCE(external_ref, '')) = ?
+        ORDER BY CASE WHEN source = ? THEN 0 ELSE 1 END, id DESC
+        LIMIT 1
+        """,
+        (str(rid), LEGACY_BOOKING_SOURCE),
     ).fetchone()
-    if row:
-        return int(row["id"])
-    return int(sync_booking_to_core(conn, int(booking_id)))
+    if mapped:
+        return int(mapped["id"])
+
+    if not allow_booking_sync:
+        return None
+
+    booking_row = conn.execute("SELECT id FROM bookings WHERE id=? LIMIT 1", (rid,)).fetchone()
+    if not booking_row:
+        return None
+    return int(sync_booking_to_core(conn, rid))
+
+
+def _ensure_core_reservation_id_for_booking(conn, booking_id: int) -> int:
+    resolved = resolve_core_reservation_id(conn, int(booking_id), allow_booking_sync=True)
+    if not resolved:
+        raise ValueError("booking_not_found")
+    return int(resolved)
 
 
 def _append_reservation_event(
@@ -262,7 +291,134 @@ def _append_reservation_event(
 
 
 def _legacy_mirror_enabled() -> bool:
-    return bool(LEGACY_MIRROR_ENABLED)
+    return bool(LEGACY_MIRROR_ENABLED) and not bool(CORE_ONLY_MODE)
+
+
+def _runtime_core_only_enabled() -> bool:
+    return bool(CORE_ONLY_MODE) or not bool(LEGACY_MIRROR_ENABLED)
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (str(table_name or "").strip(),),
+    ).fetchone()
+    return bool(row)
+
+
+def _load_reservation_metadata(conn, reservation_id: int):
+    return conn.execute(
+        """
+        SELECT
+            reservation_id,
+            formname,
+            tranid,
+            phone_raw,
+            user_chat_id,
+            guest_segment,
+            raw_payload_json,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            utm_term
+        FROM reservation_metadata
+        WHERE reservation_id = ?
+        LIMIT 1
+        """,
+        (int(reservation_id),),
+    ).fetchone()
+
+
+def _upsert_reservation_metadata(
+    conn,
+    *,
+    reservation_id: int,
+    formname: Optional[str] = None,
+    tranid: Optional[str] = None,
+    phone_raw: Optional[str] = None,
+    user_chat_id: Optional[str] = None,
+    guest_segment: Optional[str] = None,
+    raw_payload_json: Optional[str] = None,
+    utm_source: Optional[str] = None,
+    utm_medium: Optional[str] = None,
+    utm_campaign: Optional[str] = None,
+    utm_content: Optional[str] = None,
+    utm_term: Optional[str] = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO reservation_metadata (
+            reservation_id,
+            formname,
+            tranid,
+            phone_raw,
+            user_chat_id,
+            guest_segment,
+            raw_payload_json,
+            utm_source,
+            utm_medium,
+            utm_campaign,
+            utm_content,
+            utm_term,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(reservation_id) DO UPDATE SET
+            formname = excluded.formname,
+            tranid = excluded.tranid,
+            phone_raw = excluded.phone_raw,
+            user_chat_id = excluded.user_chat_id,
+            guest_segment = excluded.guest_segment,
+            raw_payload_json = excluded.raw_payload_json,
+            utm_source = excluded.utm_source,
+            utm_medium = excluded.utm_medium,
+            utm_campaign = excluded.utm_campaign,
+            utm_content = excluded.utm_content,
+            utm_term = excluded.utm_term,
+            updated_at = datetime('now')
+        """,
+        (
+            int(reservation_id),
+            str(formname or "").strip() or None,
+            str(tranid or "").strip() or None,
+            str(phone_raw or "").strip() or None,
+            str(user_chat_id or "").strip() or None,
+            str(guest_segment or "").strip() or None,
+            str(raw_payload_json or "").strip() or None,
+            str(utm_source or "").strip() or None,
+            str(utm_medium or "").strip() or None,
+            str(utm_campaign or "").strip() or None,
+            str(utm_content or "").strip() or None,
+            str(utm_term or "").strip() or None,
+        ),
+    )
+
+
+def _find_reservation_id_by_tranid(conn, tranid: str) -> Optional[int]:
+    token = str(tranid or "").strip()
+    if not token:
+        return None
+    row = conn.execute(
+        """
+        SELECT reservation_id
+        FROM reservation_metadata
+        WHERE tranid = ?
+        LIMIT 1
+        """,
+        (token,),
+    ).fetchone()
+    return int(row["reservation_id"]) if row else None
+
+
+def _assign_self_external_ref(conn, reservation_id: int) -> None:
+    update_reservation(
+        conn,
+        int(reservation_id),
+        set_sql="external_ref = ?",
+        params=(str(int(reservation_id)),),
+        missing_error_code="reservation_not_found_after_upsert",
+    )
 
 
 def ensure_public_reservation_token(
@@ -304,12 +460,171 @@ def ensure_public_reservation_token(
     return token
 
 
+def _create_canonical_reservation(
+    conn,
+    *,
+    guest_name: str,
+    guest_phone: Optional[str],
+    reservation_at: str,
+    party_size: int,
+    comment: str = "",
+    deposit_amount: Optional[int] = None,
+    deposit_comment: str = "",
+    deposit_set_at: Optional[str] = None,
+    deposit_set_by: Optional[str] = None,
+    status: str = "pending",
+    source: str = LEGACY_BOOKING_SOURCE,
+    external_ref: Optional[str] = None,
+    created_at: Optional[str] = None,
+    updated_at: Optional[str] = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO reservations (
+            guest_name,
+            guest_phone,
+            reservation_at,
+            party_size,
+            comment,
+            deposit_amount,
+            deposit_comment,
+            deposit_set_at,
+            deposit_set_by,
+            status,
+            created_at,
+            updated_at,
+            source,
+            external_ref
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            COALESCE(?, datetime('now')),
+            COALESCE(?, datetime('now')),
+            ?, ?
+        )
+        """,
+        (
+            str(guest_name or "").strip() or None,
+            str(guest_phone or "").strip() or None,
+            str(reservation_at or "").strip(),
+            int(party_size),
+            (comment or "").strip() or None,
+            deposit_amount,
+            (deposit_comment or "").strip() or None,
+            deposit_set_at,
+            deposit_set_by,
+            str(status or "").strip() or "pending",
+            created_at,
+            updated_at,
+            str(source or "").strip() or LEGACY_BOOKING_SOURCE,
+            str(external_ref or "").strip() or None,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _bind_canonical_reservation_to_booking(
+    conn,
+    *,
+    reservation_id: int,
+    booking_id: int,
+) -> None:
+    update_reservation(
+        conn,
+        int(reservation_id),
+        set_sql="external_ref = ?",
+        params=(str(int(booking_id)),),
+        missing_error_code="reservation_not_found_after_upsert",
+    )
+
+
+def _upsert_canonical_reservation_for_booking(
+    conn,
+    *,
+    booking_id: int,
+    guest_name: str,
+    guest_phone: Optional[str],
+    reservation_at: str,
+    party_size: int,
+    comment: str = "",
+    deposit_amount: Optional[int] = None,
+    deposit_comment: str = "",
+    deposit_set_at: Optional[str] = None,
+    deposit_set_by: Optional[str] = None,
+    status: str = "pending",
+    created_at: Optional[str] = None,
+    updated_at: Optional[str] = None,
+) -> int:
+    reservation = conn.execute(
+        """
+        SELECT id
+        FROM reservations
+        WHERE source = ? AND external_ref = ?
+        LIMIT 1
+        """,
+        (LEGACY_BOOKING_SOURCE, str(int(booking_id))),
+    ).fetchone()
+    if reservation:
+        update_reservation(
+            conn,
+            int(reservation["id"]),
+            set_sql="""
+                guest_name = ?,
+                guest_phone = ?,
+                reservation_at = ?,
+                party_size = ?,
+                comment = ?,
+                deposit_amount = ?,
+                deposit_comment = ?,
+                deposit_set_at = ?,
+                deposit_set_by = ?,
+                status = ?,
+                created_at = COALESCE(?, created_at)
+            """,
+            params=(
+                str(guest_name or "").strip() or None,
+                str(guest_phone or "").strip() or None,
+                str(reservation_at or "").strip(),
+                int(party_size),
+                (comment or "").strip() or None,
+                deposit_amount,
+                (deposit_comment or "").strip() or None,
+                deposit_set_at,
+                deposit_set_by,
+                str(status or "").strip() or "pending",
+                created_at,
+            ),
+            missing_error_code="reservation_not_found_after_upsert",
+        )
+        return int(reservation["id"])
+
+    return _create_canonical_reservation(
+        conn,
+        guest_name=guest_name,
+        guest_phone=guest_phone,
+        reservation_at=reservation_at,
+        party_size=party_size,
+        comment=comment,
+        deposit_amount=deposit_amount,
+        deposit_comment=deposit_comment,
+        deposit_set_at=deposit_set_at,
+        deposit_set_by=deposit_set_by,
+        status=status,
+        source=LEGACY_BOOKING_SOURCE,
+        external_ref=str(int(booking_id)),
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
 def load_booking_read_model(conn, booking_id: int) -> Optional[dict]:
     legacy_row = conn.execute("SELECT * FROM bookings WHERE id=?", (int(booking_id),)).fetchone()
+    resolved_reservation_id = resolve_core_reservation_id(conn, int(booking_id), allow_booking_sync=False)
+    meta_row = _load_reservation_metadata(conn, int(resolved_reservation_id)) if resolved_reservation_id else None
     core_row = conn.execute(
         """
         SELECT
             r.id AS reservation_id,
+            r.source,
             r.guest_name,
             r.guest_phone,
             r.reservation_at,
@@ -318,6 +633,9 @@ def load_booking_read_model(conn, booking_id: int) -> Optional[dict]:
             r.deposit_amount,
             r.deposit_comment,
             r.status,
+            r.created_at,
+            r.updated_at,
+            r.external_ref,
             tc.code AS assigned_table_number
         FROM reservations r
         LEFT JOIN reservation_tables rt
@@ -325,11 +643,11 @@ def load_booking_read_model(conn, booking_id: int) -> Optional[dict]:
          AND rt.released_at IS NULL
         LEFT JOIN tables_core tc
           ON tc.id = rt.table_id
-        WHERE r.source = ? AND r.external_ref = ?
+        WHERE r.id = ?
         ORDER BY rt.id DESC
         LIMIT 1
         """,
-        (LEGACY_BOOKING_SOURCE, str(int(booking_id))),
+        (int(resolved_reservation_id or 0),),
     ).fetchone()
 
     if not legacy_row and not core_row:
@@ -365,10 +683,29 @@ def load_booking_read_model(conn, booking_id: int) -> Optional[dict]:
 
     if core_row:
         reservation_at = str(core_row["reservation_at"] or "").strip()
+        public_token_row = None
+        if _table_exists(conn, "public_reservation_tokens"):
+            public_token_row = conn.execute(
+                """
+                SELECT public_token
+                FROM public_reservation_tokens
+                WHERE reservation_id = ?
+                  AND token_kind = 'guest_access'
+                  AND status = 'active'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(core_row["reservation_id"]),),
+            ).fetchone()
         model.update(
             {
                 "name": core_row["guest_name"],
                 "phone_e164": core_row["guest_phone"],
+                "phone_raw": (
+                    meta_row["phone_raw"]
+                    if meta_row and str(meta_row["phone_raw"] or "").strip()
+                    else core_row["guest_phone"]
+                ),
                 "reservation_dt": reservation_at or None,
                 "reservation_date": reservation_at[:10] if reservation_at else None,
                 "reservation_time": reservation_at[11:16] if len(reservation_at) >= 16 else None,
@@ -378,6 +715,23 @@ def load_booking_read_model(conn, booking_id: int) -> Optional[dict]:
                 "deposit_amount": core_row["deposit_amount"],
                 "deposit_comment": core_row["deposit_comment"],
                 "status": _core_status_to_legacy(core_row["status"]),
+                "formname": (
+                    meta_row["formname"]
+                    if meta_row and str(meta_row["formname"] or "").strip()
+                    else core_row["source"]
+                ),
+                "source": core_row["source"],
+                "tranid": meta_row["tranid"] if meta_row else None,
+                "guest_segment": meta_row["guest_segment"] if meta_row else None,
+                "reservation_token": public_token_row["public_token"] if public_token_row else None,
+                "raw_payload_json": meta_row["raw_payload_json"] if meta_row else None,
+                "utm_source": meta_row["utm_source"] if meta_row else None,
+                "utm_medium": meta_row["utm_medium"] if meta_row else None,
+                "utm_campaign": meta_row["utm_campaign"] if meta_row else None,
+                "utm_content": meta_row["utm_content"] if meta_row else None,
+                "utm_term": meta_row["utm_term"] if meta_row else None,
+                "created_at": core_row["created_at"],
+                "updated_at": core_row["updated_at"],
             }
         )
 
@@ -475,7 +829,7 @@ def _set_core_table_assignment(conn, reservation_id: int, table_code: str, actor
     table_id = _ensure_table_core_id(conn, table_code)
     active = conn.execute(
         """
-        SELECT id, table_id
+        SELECT id, table_id, version
         FROM reservation_tables
         WHERE reservation_id = ? AND released_at IS NULL
         ORDER BY id DESC
@@ -486,7 +840,7 @@ def _set_core_table_assignment(conn, reservation_id: int, table_code: str, actor
     if active and int(active["table_id"]) == table_id:
         return
     if active:
-        conn.execute("UPDATE reservation_tables SET released_at = datetime('now') WHERE id = ?", (int(active["id"]),))
+        release_assignment(conn, int(active["id"]), expected_version=int(active["version"] or 1))
     conn.execute(
         """
         INSERT INTO reservation_tables (reservation_id, table_id, assigned_by)
@@ -497,14 +851,16 @@ def _set_core_table_assignment(conn, reservation_id: int, table_code: str, actor
 
 
 def _clear_core_table_assignment(conn, reservation_id: int) -> None:
-    conn.execute(
+    rows = conn.execute(
         """
-        UPDATE reservation_tables
-        SET released_at = datetime('now')
+        SELECT id, version
+        FROM reservation_tables
         WHERE reservation_id = ? AND released_at IS NULL
         """,
         (int(reservation_id),),
-    )
+    ).fetchall()
+    for row in rows:
+        release_assignment(conn, int(row["id"]), expected_version=int(row["version"] or 1))
 
 
 def _set_core_table_restriction(
@@ -515,14 +871,17 @@ def _set_core_table_restriction(
     reservation_id: Optional[int] = None,
 ) -> None:
     table_id = _ensure_table_core_id(conn, table_code)
-    conn.execute(
+    rows = conn.execute(
         """
-        DELETE FROM table_blocks
+        SELECT id, version
+        FROM table_blocks
         WHERE table_id = ?
           AND datetime(ends_at) > datetime('now')
         """,
         (table_id,),
-    )
+    ).fetchall()
+    for row in rows:
+        delete_table_block(conn, int(row["id"]), expected_version=int(row["version"] or 1))
     ends_at = str(restricted_until or "").strip()
     if not ends_at:
         return
@@ -610,18 +969,48 @@ def get_active_table_restrictions(conn):
 def get_table_booking_conflicts(conn, table_number: str, reservation_dt: str, exclude_booking_id: int = 0):
     if not reservation_dt:
         return []
-    return conn.execute(
+    normalized_dt = str(reservation_dt or "").strip().replace("T", " ")
+    exclude_reservation_id = resolve_core_reservation_id(conn, int(exclude_booking_id or 0), allow_booking_sync=False)
+    rows = conn.execute(
         """
-        SELECT id, name, reservation_dt, status
-        FROM bookings
-        WHERE assigned_table_number = ?
-          AND COALESCE(reservation_dt, '') = ?
-          AND id != ?
-          AND COALESCE(status, 'WAITING') NOT IN ('DECLINED', 'CANCELLED', 'NO_SHOW')
-        ORDER BY id ASC
+        SELECT
+            r.id AS reservation_id,
+            r.external_ref,
+            r.guest_name AS name,
+            replace(r.reservation_at, 'T', ' ') AS reservation_dt,
+            r.status
+        FROM reservations r
+        JOIN reservation_tables rt
+          ON rt.reservation_id = r.id
+         AND rt.released_at IS NULL
+        JOIN tables_core tc
+          ON tc.id = rt.table_id
+        WHERE tc.code = ?
+          AND replace(r.reservation_at, 'T', ' ') = ?
+          AND COALESCE(lower(trim(r.status)), 'pending') NOT IN ('declined', 'cancelled', 'no_show', 'completed')
+          AND (? IS NULL OR r.id != ?)
+        ORDER BY r.id ASC
         """,
-        (table_number, reservation_dt, int(exclude_booking_id or 0)),
+        (
+            str(table_number or "").strip(),
+            normalized_dt,
+            int(exclude_reservation_id) if exclude_reservation_id else None,
+            int(exclude_reservation_id) if exclude_reservation_id else None,
+        ),
     ).fetchall()
+    conflicts = []
+    for row in rows:
+        external_ref = str(row["external_ref"] or "").strip()
+        booking_like_id = int(external_ref) if external_ref.isdigit() else int(row["reservation_id"])
+        conflicts.append(
+            {
+                "id": booking_like_id,
+                "name": row["name"],
+                "reservation_dt": row["reservation_dt"],
+                "status": _core_status_to_legacy(row["status"]),
+            }
+        )
+    return conflicts
 
 
 def get_table_assignment_conflicts(conn, booking_row, table_number: str, exclude_booking_id: int = 0) -> dict:
@@ -681,7 +1070,7 @@ def assign_table_to_booking(
     if not normalized_table:
         raise ValueError("invalid_table_number")
 
-    booking_row = conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    booking_row = load_booking_read_model(conn, booking_id)
     if not booking_row:
         raise ValueError("booking_not_found")
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
@@ -768,9 +1157,12 @@ def assign_table_to_booking(
     if moved_restriction and prev_table:
         log_table_event(conn, prev_table, "TABLE_LABEL_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
         log_table_event(conn, normalized_table, "TABLE_RESTRICTED", actor_id, actor_name, payload, booking_id=booking_id)
-        sync_table_state_to_core(conn, prev_table)
-    sync_booking_state_to_core(conn, booking_id)
-    sync_table_state_to_core(conn, normalized_table)
+    # In mirror-off mode the canonical assignment is already the source of truth.
+    if _legacy_mirror_enabled():
+        if moved_restriction and prev_table:
+            sync_table_state_to_core(conn, prev_table)
+        sync_booking_state_to_core(conn, booking_id)
+        sync_table_state_to_core(conn, normalized_table)
     return {"table_number": normalized_table, "conflicts": conflicts, "previous_table_number": prev_table}
 
 
@@ -781,7 +1173,7 @@ def clear_table_assignment(conn, booking_id: int, actor_id: str, actor_name: str
         actor_id=actor_id,
         actor_name=actor_name,
     )
-    booking_row = conn.execute("SELECT assigned_table_number FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    booking_row = load_booking_read_model(conn, booking_id)
     if not booking_row:
         raise ValueError("booking_not_found")
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
@@ -801,8 +1193,10 @@ def clear_table_assignment(conn, booking_id: int, actor_id: str, actor_name: str
     log_booking_event(conn, booking_id, "TABLE_CLEARED", actor_id, actor_name, payload)
     if prev_table:
         log_table_event(conn, prev_table, "TABLE_CLEARED", actor_id, actor_name, payload, booking_id=booking_id)
-        sync_table_state_to_core(conn, prev_table)
-    sync_booking_state_to_core(conn, booking_id)
+    if _legacy_mirror_enabled():
+        if prev_table:
+            sync_table_state_to_core(conn, prev_table)
+        sync_booking_state_to_core(conn, booking_id)
     return {"previous_table_number": prev_table}
 
 
@@ -830,24 +1224,23 @@ def set_booking_deposit(
     if deposit_amount <= 0:
         raise ValueError("invalid_deposit_amount")
 
-    booking_row = conn.execute("SELECT id FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+    booking_row = load_booking_read_model(conn, booking_id)
     if not booking_row:
         raise ValueError("booking_not_found")
 
     actor_display = (actor_name or actor_id or "").strip() or "telegram"
     deposit_comment = (comment or "").strip()
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
-    conn.execute(
-        """
-        UPDATE reservations
-        SET deposit_amount = ?,
+    update_reservation(
+        conn,
+        reservation_id,
+        set_sql="""
+            deposit_amount = ?,
             deposit_comment = ?,
             deposit_set_at = datetime('now'),
-            deposit_set_by = ?,
-            updated_at = datetime('now')
-        WHERE id = ?
+            deposit_set_by = ?
         """,
-        (deposit_amount, deposit_comment or None, actor_display, reservation_id),
+        params=(deposit_amount, deposit_comment or None, actor_display),
     )
     if _legacy_mirror_enabled():
         conn.execute(
@@ -883,10 +1276,7 @@ def clear_booking_deposit(
         actor_id=actor_id,
         actor_name=actor_name,
     )
-    booking_row = conn.execute(
-        "SELECT id, deposit_amount, deposit_comment FROM bookings WHERE id = ?",
-        (booking_id,),
-    ).fetchone()
+    booking_row = load_booking_read_model(conn, booking_id)
     if not booking_row:
         raise ValueError("booking_not_found")
 
@@ -895,17 +1285,15 @@ def clear_booking_deposit(
         "old_deposit_comment": booking_row["deposit_comment"],
     }
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
-    conn.execute(
-        """
-        UPDATE reservations
-        SET deposit_amount = NULL,
+    update_reservation(
+        conn,
+        reservation_id,
+        set_sql="""
+            deposit_amount = NULL,
             deposit_comment = NULL,
             deposit_set_at = NULL,
-            deposit_set_by = NULL,
-            updated_at = datetime('now')
-        WHERE id = ?
+            deposit_set_by = NULL
         """,
-        (reservation_id,),
     )
     if _legacy_mirror_enabled():
         conn.execute(
@@ -1061,7 +1449,7 @@ def set_table_label(
 
 
 def ensure_visit_from_confirmed_booking(conn, booking_id: int, actor_id: str, actor_name: str):
-    b = conn.execute("SELECT * FROM bookings WHERE id=?", (booking_id,)).fetchone()
+    b = load_booking_read_model(conn, booking_id)
     if not b:
         return
 
@@ -1155,15 +1543,12 @@ def ensure_visit_from_confirmed_booking(conn, booking_id: int, actor_id: str, ac
 
 
 def mark_booking_cancelled(conn, booking_id: int, actor_id: str, actor_name: str):
-    b = conn.execute(
-        "SELECT phone_e164, reservation_dt FROM bookings WHERE id=?",
-        (booking_id,),
-    ).fetchone()
+    b = load_booking_read_model(conn, booking_id)
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
-
-    conn.execute(
-        "UPDATE reservations SET status='cancelled', updated_at=datetime('now') WHERE id=?",
-        (reservation_id,),
+    update_reservation(
+        conn,
+        reservation_id,
+        set_sql="status = 'cancelled'",
     )
     if _legacy_mirror_enabled():
         conn.execute(
@@ -1202,9 +1587,11 @@ def set_booking_status(conn, booking_id: int, status: str, actor_id: str, actor_
     payload = {"source": source} if source else {}
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
 
-    conn.execute(
-        "UPDATE reservations SET status=?, updated_at=datetime('now') WHERE id=?",
-        (_legacy_status_to_core(normalized), reservation_id),
+    update_reservation(
+        conn,
+        reservation_id,
+        set_sql="status = ?",
+        params=(_legacy_status_to_core(normalized),),
     )
     if _legacy_mirror_enabled():
         conn.execute(
@@ -1235,13 +1622,11 @@ def reschedule_booking(
 
     reservation_dt = f"{date_value}T{time_value}"
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
-    conn.execute(
-        """
-        UPDATE reservations
-        SET reservation_at=?, updated_at=datetime('now')
-        WHERE id=?
-        """,
-        (reservation_dt, reservation_id),
+    update_reservation(
+        conn,
+        reservation_id,
+        set_sql="reservation_at = ?",
+        params=(reservation_dt,),
     )
     if _legacy_mirror_enabled():
         conn.execute(
@@ -1277,13 +1662,11 @@ def update_booking_guests_count(
     if party_size <= 0:
         raise ValueError("invalid_guests_count")
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
-    conn.execute(
-        """
-        UPDATE reservations
-        SET party_size=?, updated_at=datetime('now')
-        WHERE id=?
-        """,
-        (party_size, reservation_id),
+    update_reservation(
+        conn,
+        reservation_id,
+        set_sql="party_size = ?",
+        params=(party_size,),
     )
 
     if _legacy_mirror_enabled():
@@ -1344,41 +1727,68 @@ def create_manual_booking(
         },
         ensure_ascii=False,
     )
-    cur = conn.execute(
-        """
-        INSERT INTO bookings
-        (
-          tranid, formname, name, phone_e164, phone_raw, user_chat_id,
-          reservation_date, reservation_time, reservation_dt,
-          guests_count, comment,
-          utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-          status, guest_segment, reservation_token, raw_payload_json
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?)
-        """,
-        (
-            None,
-            "crm_manual",
-            (guest_name or "").strip() or "CRM",
-            str(guest_phone or "").strip() or None,
-            str(guest_phone or "").strip() or None,
-            None,
-            date_value,
-            time_value,
-            f"{date_value}T{time_value}",
-            party_size,
-            (comment or "").strip() or None,
-            "crm",
-            "manual",
-            None,
-            None,
-            None,
-            "manual",
-            None,
-            raw_payload,
-        ),
+    reservation_id = _create_canonical_reservation(
+        conn,
+        guest_name=(guest_name or "").strip() or "CRM",
+        guest_phone=str(guest_phone or "").strip() or None,
+        reservation_at=f"{date_value}T{time_value}",
+        party_size=party_size,
+        comment=(comment or "").strip(),
+        status="confirmed",
+        source=LEGACY_BOOKING_SOURCE,
+        external_ref=f"pending:{secrets.token_hex(8)}",
     )
-    booking_id = int(cur.lastrowid)
+    if _runtime_core_only_enabled():
+        _assign_self_external_ref(conn, reservation_id)
+        booking_id = int(reservation_id)
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO bookings
+            (
+              tranid, formname, name, phone_e164, phone_raw, user_chat_id,
+              reservation_date, reservation_time, reservation_dt,
+              guests_count, comment,
+              utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+              status, guest_segment, reservation_token, raw_payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?)
+            """,
+            (
+                None,
+                "crm_manual",
+                (guest_name or "").strip() or "CRM",
+                str(guest_phone or "").strip() or None,
+                str(guest_phone or "").strip() or None,
+                None,
+                date_value,
+                time_value,
+                f"{date_value}T{time_value}",
+                party_size,
+                (comment or "").strip() or None,
+                "crm",
+                "manual",
+                None,
+                None,
+                None,
+                "manual",
+                None,
+                raw_payload,
+            ),
+        )
+        booking_id = int(cur.lastrowid)
+        _bind_canonical_reservation_to_booking(conn, reservation_id=reservation_id, booking_id=booking_id)
+
+    _upsert_reservation_metadata(
+        conn,
+        reservation_id=reservation_id,
+        formname="crm_manual",
+        phone_raw=str(guest_phone or "").strip() or None,
+        guest_segment="manual",
+        raw_payload_json=raw_payload,
+        utm_source="crm",
+        utm_medium="manual",
+    )
     log_booking_event(conn, booking_id, "CREATED", actor_id, actor_name, {"source": "crm_manual"})
 
     normalized_table = normalize_table_number(table_number) if table_number else None
@@ -1397,9 +1807,7 @@ def create_manual_booking(
         )
         notify_waiters = True
 
-    reservation_id = int(sync_booking_to_core(conn, booking_id))
-    sync_booking_assignment_to_core(conn, booking_id)
-    return {"booking_id": booking_id, "notify_waiters": notify_waiters}
+    return {"booking_id": booking_id, "notify_waiters": notify_waiters, "reservation_id": reservation_id}
 
 
 def create_telegram_miniapp_booking_record(
@@ -1417,60 +1825,177 @@ def create_telegram_miniapp_booking_record(
     source: str = "telegram_miniapp_api",
 ) -> dict:
     existing = conn.execute(
-        "SELECT id FROM bookings WHERE reservation_token=?",
+        """
+        SELECT prt.reservation_id
+        FROM public_reservation_tokens prt
+        WHERE prt.public_token = ?
+          AND prt.token_kind = 'guest_access'
+        ORDER BY prt.id DESC
+        LIMIT 1
+        """,
         (reservation_token,),
     ).fetchone()
+    reservation_at = f"{date_value}T{time_value}:00" if len(str(time_value or "").strip()) == 5 else f"{date_value}T{time_value}"
     if existing:
-        booking_id = int(existing["id"])
-        reservation_id = int(sync_booking_to_core(conn, booking_id))
+        reservation_id = int(existing["reservation_id"])
+        legacy_external_ref_row = conn.execute(
+            "SELECT external_ref FROM reservations WHERE id = ? LIMIT 1",
+            (reservation_id,),
+        ).fetchone()
+        legacy_booking_id = (
+            int(str(legacy_external_ref_row["external_ref"] or "").strip())
+            if legacy_external_ref_row and str(legacy_external_ref_row["external_ref"] or "").strip().isdigit()
+            else None
+        )
+        update_reservation(
+            conn,
+            reservation_id,
+            set_sql="""
+                guest_name = ?,
+                guest_phone = ?,
+                reservation_at = ?,
+                party_size = ?,
+                comment = ?,
+                status = ?
+            """,
+            params=(
+                display_name or "Telegram",
+                phone_e164,
+                reservation_at,
+                int(guests_count),
+                comment_value or None,
+                "pending",
+            ),
+            missing_error_code="reservation_not_found_after_upsert",
+        )
+        if _legacy_mirror_enabled() and legacy_booking_id:
+            conn.execute(
+                """
+                UPDATE bookings
+                SET name=?,
+                    phone_e164=?,
+                    phone_raw=?,
+                    user_chat_id=?,
+                    reservation_date=?,
+                    reservation_time=?,
+                    reservation_dt=?,
+                    guests_count=?,
+                    comment=?,
+                    guest_segment='NEW',
+                    reservation_token=?,
+                    raw_payload_json=?,
+                    updated_at=datetime('now')
+                WHERE id=?
+                """,
+                (
+                    display_name or "Telegram",
+                    phone_e164,
+                    phone_e164,
+                    tg_user_id,
+                    date_value,
+                    time_value,
+                    f"{date_value} {time_value}:00",
+                    guests_count,
+                    comment_value,
+                    reservation_token,
+                    raw_payload_json,
+                    legacy_booking_id,
+                ),
+            )
         ensure_public_reservation_token(
             conn,
             reservation_id=reservation_id,
             public_token=reservation_token,
         )
+        _upsert_reservation_metadata(
+            conn,
+            reservation_id=reservation_id,
+            formname="telegram_miniapp",
+            phone_raw=phone_e164,
+            user_chat_id=tg_user_id,
+            guest_segment="NEW",
+            raw_payload_json=raw_payload_json,
+            utm_source="telegram",
+            utm_medium="miniapp",
+        )
+        booking_id = int(reservation_id) if _runtime_core_only_enabled() else int(
+            str(
+                conn.execute(
+                    "SELECT external_ref FROM reservations WHERE id = ? LIMIT 1",
+                    (reservation_id,),
+                ).fetchone()["external_ref"]
+                or reservation_id
+            ).strip()
+        )
         return {"booking_id": booking_id, "duplicate": True}
 
-    cur = conn.execute(
-        """
-        INSERT INTO bookings
-        (tranid, formname, name, phone_e164, phone_raw, user_chat_id,
-         reservation_date, reservation_time, reservation_dt,
-         guests_count, comment,
-         utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-         status, guest_segment, reservation_token, raw_payload_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
-        """,
-        (
-            None,
-            "telegram_miniapp",
-            display_name or "Telegram",
-            phone_e164,
-            phone_e164,
-            tg_user_id,
-            date_value,
-            time_value,
-            f"{date_value} {time_value}:00",
-            guests_count,
-            comment_value,
-            "telegram",
-            "miniapp",
-            None,
-            None,
-            None,
-            "NEW",
-            reservation_token,
-            raw_payload_json,
-        ),
+    reservation_id = _create_canonical_reservation(
+        conn,
+        guest_name=display_name or "Telegram",
+        guest_phone=phone_e164,
+        reservation_at=reservation_at,
+        party_size=int(guests_count),
+        comment=comment_value,
+        status="pending",
+        source=LEGACY_BOOKING_SOURCE,
+        external_ref=f"pending:{secrets.token_hex(8)}",
     )
-    booking_id = int(cur.lastrowid)
+    if _runtime_core_only_enabled():
+        _assign_self_external_ref(conn, reservation_id)
+        booking_id = int(reservation_id)
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO bookings
+            (tranid, formname, name, phone_e164, phone_raw, user_chat_id,
+             reservation_date, reservation_time, reservation_dt,
+             guests_count, comment,
+             utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+             status, guest_segment, reservation_token, raw_payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
+            """,
+            (
+                None,
+                "telegram_miniapp",
+                display_name or "Telegram",
+                phone_e164,
+                phone_e164,
+                tg_user_id,
+                date_value,
+                time_value,
+                f"{date_value} {time_value}:00",
+                guests_count,
+                comment_value,
+                "telegram",
+                "miniapp",
+                None,
+                None,
+                None,
+                "NEW",
+                reservation_token,
+                raw_payload_json,
+            ),
+        )
+        booking_id = int(cur.lastrowid)
+        _bind_canonical_reservation_to_booking(conn, reservation_id=reservation_id, booking_id=booking_id)
+
+    _upsert_reservation_metadata(
+        conn,
+        reservation_id=reservation_id,
+        formname="telegram_miniapp",
+        phone_raw=phone_e164,
+        user_chat_id=tg_user_id,
+        guest_segment="NEW",
+        raw_payload_json=raw_payload_json,
+        utm_source="telegram",
+        utm_medium="miniapp",
+    )
     log_booking_event(conn, booking_id, "CREATED", tg_user_id, "", {"source": source})
-    reservation_id = int(sync_booking_to_core(conn, booking_id))
     ensure_public_reservation_token(
         conn,
         reservation_id=reservation_id,
         public_token=reservation_token,
     )
-    sync_booking_assignment_to_core(conn, booking_id)
     return {"booking_id": booking_id, "duplicate": False}
 
 
@@ -1496,43 +2021,163 @@ def upsert_tilda_booking_record(
     guest_segment: str,
     source: str = "tilda",
 ) -> dict:
-    existing = None
-    if tranid:
-        existing = conn.execute(
-            "SELECT id FROM bookings WHERE tranid=?",
-            (tranid,),
-        ).fetchone()
+    existing_reservation_id = _find_reservation_id_by_tranid(conn, tranid)
 
-    if existing:
-        booking_id = int(existing["id"])
-        existing_token_row = conn.execute("SELECT reservation_token FROM bookings WHERE id=?", (booking_id,)).fetchone()
-        reservation_token = str(existing_token_row["reservation_token"] or "").strip() if existing_token_row else ""
+    if existing_reservation_id:
+        reservation_id = int(existing_reservation_id)
+        external_ref_row = conn.execute(
+            "SELECT external_ref FROM reservations WHERE id = ? LIMIT 1",
+            (reservation_id,),
+        ).fetchone()
+        legacy_booking_id = (
+            int(str(external_ref_row["external_ref"] or "").strip())
+            if external_ref_row and str(external_ref_row["external_ref"] or "").strip().isdigit()
+            else None
+        )
+        existing_token_row = conn.execute(
+            """
+            SELECT public_token
+            FROM public_reservation_tokens
+            WHERE reservation_id = ?
+              AND token_kind = 'guest_access'
+              AND status = 'active'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (reservation_id,),
+        ).fetchone()
+        reservation_token = str(existing_token_row["public_token"] or "").strip() if existing_token_row else ""
         if not reservation_token:
             reservation_token = secrets.token_urlsafe(24)
-        conn.execute(
+        update_reservation(
+            conn,
+            reservation_id,
+            set_sql="""
+                guest_name = ?,
+                guest_phone = ?,
+                reservation_at = ?,
+                party_size = ?,
+                comment = ?,
+                status = ?
+            """,
+            params=(
+                name or None,
+                phone_e164 or None,
+                reservation_dt,
+                max(1, int(guests_count or 0)),
+                comment or None,
+                "pending",
+            ),
+            missing_error_code="reservation_not_found_after_upsert",
+        )
+        if _legacy_mirror_enabled() and legacy_booking_id:
+            conn.execute(
+                """
+                UPDATE bookings
+                SET name=?,
+                    phone_e164=?,
+                    phone_raw=?,
+                    reservation_date=?,
+                    reservation_time=?,
+                    reservation_dt=?,
+                    guests_count=?,
+                    comment=?,
+                    utm_source=?,
+                    utm_medium=?,
+                    utm_campaign=?,
+                    utm_content=?,
+                    utm_term=?,
+                    formname=?,
+                    guest_segment=?,
+                    reservation_token=?,
+                    raw_payload_json=?,
+                    updated_at=datetime('now')
+                WHERE id=?
+                """,
+                (
+                    name,
+                    phone_e164,
+                    phone_raw,
+                    date_raw,
+                    time_raw,
+                    reservation_dt,
+                    guests_count,
+                    comment,
+                    utm_source,
+                    utm_medium,
+                    utm_campaign,
+                    utm_content,
+                    utm_term,
+                    formname,
+                    guest_segment,
+                    reservation_token,
+                    payload_json,
+                    legacy_booking_id,
+                ),
+            )
+        _upsert_reservation_metadata(
+            conn,
+            reservation_id=reservation_id,
+            formname=formname,
+            tranid=tranid,
+            phone_raw=phone_raw,
+            guest_segment=guest_segment,
+            raw_payload_json=payload_json,
+            utm_source=utm_source,
+            utm_medium=utm_medium,
+            utm_campaign=utm_campaign,
+            utm_content=utm_content,
+            utm_term=utm_term,
+        )
+        booking_id = int(reservation_id) if _runtime_core_only_enabled() else int(
+            str(
+                conn.execute(
+                    "SELECT external_ref FROM reservations WHERE id = ? LIMIT 1",
+                    (reservation_id,),
+                ).fetchone()["external_ref"]
+                or reservation_id
+            ).strip()
+        )
+        log_booking_event(conn, booking_id, "UPDATED", "system", "system", {"source": source})
+        ensure_public_reservation_token(
+            conn,
+            reservation_id=reservation_id,
+            public_token=reservation_token,
+        )
+        return {
+            "booking_id": booking_id,
+            "reservation_token": reservation_token,
+            "existing": True,
+        }
+
+    reservation_token = secrets.token_urlsafe(24)
+    reservation_id = _create_canonical_reservation(
+        conn,
+        guest_name=name,
+        guest_phone=phone_e164,
+        reservation_at=reservation_dt,
+        party_size=max(1, int(guests_count or 0)),
+        comment=comment,
+        status="pending",
+        source=LEGACY_BOOKING_SOURCE,
+        external_ref=f"pending:{secrets.token_hex(8)}",
+    )
+    if _runtime_core_only_enabled():
+        _assign_self_external_ref(conn, reservation_id)
+        booking_id = int(reservation_id)
+    else:
+        cur = conn.execute(
             """
-            UPDATE bookings
-            SET name=?,
-                phone_e164=?,
-                phone_raw=?,
-                reservation_date=?,
-                reservation_time=?,
-                reservation_dt=?,
-                guests_count=?,
-                comment=?,
-                utm_source=?,
-                utm_medium=?,
-                utm_campaign=?,
-                utm_content=?,
-                utm_term=?,
-                formname=?,
-                guest_segment=?,
-                reservation_token=?,
-                raw_payload_json=?,
-                updated_at=datetime('now')
-            WHERE id=?
+            INSERT INTO bookings
+              (tranid, formname, name, phone_e164, phone_raw, reservation_date, reservation_time, reservation_dt,
+               guests_count, comment, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+               status, guest_segment, reservation_token, raw_payload_json)
+            VALUES
+              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
             """,
             (
+                tranid or None,
+                formname,
                 name,
                 phone_e164,
                 phone_raw,
@@ -1546,74 +2191,33 @@ def upsert_tilda_booking_record(
                 utm_campaign,
                 utm_content,
                 utm_term,
-                formname,
                 guest_segment,
                 reservation_token,
                 payload_json,
-                booking_id,
             ),
         )
-        log_booking_event(
-            conn,
-            booking_id,
-            "UPDATED",
-            "system",
-            "system",
-            {"source": source},
-        )
-        reservation_id = int(sync_booking_to_core(conn, booking_id))
-        ensure_public_reservation_token(
-            conn,
-            reservation_id=reservation_id,
-            public_token=reservation_token,
-        )
-        sync_booking_assignment_to_core(conn, booking_id)
-        return {
-            "booking_id": booking_id,
-            "reservation_token": reservation_token,
-            "existing": True,
-        }
-
-    reservation_token = secrets.token_urlsafe(24)
-    cur = conn.execute(
-        """
-        INSERT INTO bookings
-          (tranid, formname, name, phone_e164, phone_raw, reservation_date, reservation_time, reservation_dt,
-           guests_count, comment, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-           status, guest_segment, reservation_token, raw_payload_json)
-        VALUES
-          (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING', ?, ?, ?)
-        """,
-        (
-            tranid or None,
-            formname,
-            name,
-            phone_e164,
-            phone_raw,
-            date_raw,
-            time_raw,
-            reservation_dt,
-            guests_count,
-            comment,
-            utm_source,
-            utm_medium,
-            utm_campaign,
-            utm_content,
-            utm_term,
-            guest_segment,
-            reservation_token,
-            payload_json,
-        ),
+        booking_id = int(cur.lastrowid)
+        _bind_canonical_reservation_to_booking(conn, reservation_id=reservation_id, booking_id=booking_id)
+    _upsert_reservation_metadata(
+        conn,
+        reservation_id=reservation_id,
+        formname=formname,
+        tranid=tranid,
+        phone_raw=phone_raw,
+        guest_segment=guest_segment,
+        raw_payload_json=payload_json,
+        utm_source=utm_source,
+        utm_medium=utm_medium,
+        utm_campaign=utm_campaign,
+        utm_content=utm_content,
+        utm_term=utm_term,
     )
-    booking_id = int(cur.lastrowid)
     log_booking_event(conn, booking_id, "CREATED", "system", "system", {"source": source})
-    reservation_id = int(sync_booking_to_core(conn, booking_id))
     ensure_public_reservation_token(
         conn,
         reservation_id=reservation_id,
         public_token=reservation_token,
     )
-    sync_booking_assignment_to_core(conn, booking_id)
     return {
         "booking_id": booking_id,
         "reservation_token": reservation_token,

@@ -44,6 +44,7 @@ from booking_service import (
     set_table_label,
     get_table_assignment_conflicts,
     get_active_table_restrictions,
+    resolve_core_reservation_id,
 )
 from booking_render import (
     render_booking_card,
@@ -57,11 +58,16 @@ from channel_binding_service import consume_binding_token_once
 from hostess_card_delivery import get_hostess_card_link
 from notification_dispatcher import send_service_notification
 from integration_service import record_inbound_event
+from telegram_pending_prompt import complete_pending_prompt, load_pending_prompt, start_pending_prompt
 
 MINIAPP_URL = os.environ.get(
     "MINIAPP_URL",
     "https://botluch-production.up.railway.app/miniapp/reserve",
 ).strip()
+
+TG_GUEST_NOTE_EVENT_TYPE = "telegram_guest_note_prompt"
+TG_TABLE_FLOW_EVENT_TYPE = "telegram_table_flow_prompt"
+TG_LINEUP_UPLOAD_EVENT_TYPE = "telegram_lineup_upload_prompt"
 
 
 def _h(s: str) -> str:
@@ -131,18 +137,10 @@ def _is_waiter_chat(chat_id: str) -> bool:
 
 def _sync_admin_booking_card(conn, booking_id: int) -> None:
     try:
-        reservation_row = conn.execute(
-            """
-            SELECT id
-            FROM reservations
-            WHERE source='legacy_booking' AND external_ref=?
-            LIMIT 1
-            """,
-            (str(int(booking_id)),),
-        ).fetchone()
-        if not reservation_row:
+        reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
+        if not reservation_id:
             return
-        link = get_hostess_card_link(conn, reservation_id=int(reservation_row["id"]))
+        link = get_hostess_card_link(conn, reservation_id=int(reservation_id))
         if not link or not link["chat_id"] or not link["message_id"]:
             return
         text_card, kb_card = render_booking_card(conn, booking_id)
@@ -156,38 +154,38 @@ def _sync_admin_booking_card(conn, booking_id: int) -> None:
         traceback.print_exc()
 
 
-def _create_pending_reply(conn, kind: str, booking_id: int, chat_id: str, actor_id: str, payload: dict, prompt_text: str) -> None:
-    prompt_message_id = tg_send_message(
-        chat_id,
-        prompt_text,
+def _start_table_flow_prompt(
+    conn,
+    *,
+    booking_id: int,
+    chat_id: str,
+    actor_id: str,
+    payload: dict[str, object],
+    prompt_text: str,
+) -> None:
+    start_pending_prompt(
+        conn,
+        event_type=TG_TABLE_FLOW_EVENT_TYPE,
+        chat_id=chat_id,
+        actor_id=actor_id,
+        booking_id=int(booking_id or 0),
+        payload=payload,
+        prompt_text=prompt_text,
         reply_markup={"force_reply": True, "selective": True},
     )
-    expires = (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds")
-    conn.execute(
-        """
-        INSERT INTO pending_replies (kind, booking_id, phone_e164, chat_id, actor_tg_id, prompt_message_id, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            kind,
-            int(booking_id or 0),
-            json.dumps(payload or {}, ensure_ascii=False),
-            chat_id,
-            actor_id,
-            str(prompt_message_id),
-            expires,
-        ),
+
+
+def _load_table_flow_prompt(conn, *, chat_id: str, actor_id: str):
+    return load_pending_prompt(
+        conn,
+        event_type=TG_TABLE_FLOW_EVENT_TYPE,
+        chat_id=chat_id,
+        actor_id=actor_id,
     )
 
 
-def _load_pending_reply_payload(row) -> dict:
-    if not row:
-        return {}
-    try:
-        payload = json.loads(row["phone_e164"] or "{}")
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
+def _complete_table_flow_prompt(conn, event_id: int, *, status: str = "processed", error_text: str = "") -> None:
+    complete_pending_prompt(conn, int(event_id), status=status, error_text=error_text)
 
 
 def _format_table_conflict_message(conflicts: dict, table_number: str) -> str:
@@ -592,14 +590,13 @@ def tg_webhook_impl():
                     action = parts[3].strip().lower()
 
                     if action == "assign":
-                        _create_pending_reply(
+                        _start_table_flow_prompt(
                             conn,
-                            "table_flow",
-                            booking_id,
-                            chat_id,
-                            actor_id,
-                            {"mode": "assign_table", "booking_id": booking_id},
-                            (
+                            booking_id=booking_id,
+                            chat_id=chat_id,
+                            actor_id=actor_id,
+                            payload={"mode": "assign_table", "booking_id": booking_id},
+                            prompt_text=(
                                 f"<b>Назначить стол</b>\nБронь #{booking_id}\n\n"
                                 "Напишите номер стола одним сообщением."
                             ),
@@ -669,18 +666,17 @@ def tg_webhook_impl():
                     if action == "restrict":
                         assigned_table = normalize_table_number(b["assigned_table_number"])
                         if assigned_table:
-                            _create_pending_reply(
+                            _start_table_flow_prompt(
                                 conn,
-                                "table_flow",
-                                booking_id,
-                                chat_id,
-                                actor_id,
-                                {
+                                booking_id=booking_id,
+                                chat_id=chat_id,
+                                actor_id=actor_id,
+                                payload={
                                     "mode": "restrict_until",
                                     "booking_id": booking_id,
                                     "table_number": assigned_table,
                                 },
-                                (
+                                prompt_text=(
                                     f"<b>Ограничить стол</b>\nБронь #{booking_id}\n"
                                     f"Стол #{assigned_table}\n\n"
                                     "Напишите, на сколько часов поставить ограничение.\n"
@@ -689,14 +685,13 @@ def tg_webhook_impl():
                             )
                             safe_answer_callback(cq_id, "Жду часы ограничения")
                         else:
-                            _create_pending_reply(
+                            _start_table_flow_prompt(
                                 conn,
-                                "table_flow",
-                                booking_id,
-                                chat_id,
-                                actor_id,
-                                {"mode": "restrict_number", "booking_id": booking_id},
-                                (
+                                booking_id=booking_id,
+                                chat_id=chat_id,
+                                actor_id=actor_id,
+                                payload={"mode": "restrict_number", "booking_id": booking_id},
+                                prompt_text=(
                                     f"<b>Ограничить стол</b>\nБронь #{booking_id}\n\n"
                                     "Сначала напишите номер стола."
                                 ),
@@ -709,19 +704,18 @@ def tg_webhook_impl():
                         if not table_number:
                             safe_answer_callback(cq_id, "Некорректный стол")
                             return {"ok": True}
-                        _create_pending_reply(
+                        _start_table_flow_prompt(
                             conn,
-                            "table_flow",
-                            booking_id,
-                            chat_id,
-                            actor_id,
-                            {
+                            booking_id=booking_id,
+                            chat_id=chat_id,
+                            actor_id=actor_id,
+                            payload={
                                 "mode": "restrict_until",
                                 "booking_id": booking_id,
                                 "table_number": table_number,
                                 "force_override": True,
                             },
-                            (
+                            prompt_text=(
                                 f"<b>Ограничить стол с override</b>\nБронь #{booking_id}\n"
                                 f"Стол #{table_number}\n\n"
                                 "Напишите, на сколько часов поставить ограничение."
@@ -747,14 +741,13 @@ def tg_webhook_impl():
                 if parts[2] == "deposit" and len(parts) >= 4:
                     action = parts[3].strip().lower()
                     if action == "set":
-                        _create_pending_reply(
+                        _start_table_flow_prompt(
                             conn,
-                            "table_flow",
-                            booking_id,
-                            chat_id,
-                            actor_id,
-                            {"mode": "set_deposit", "booking_id": booking_id},
-                            (
+                            booking_id=booking_id,
+                            chat_id=chat_id,
+                            actor_id=actor_id,
+                            payload={"mode": "set_deposit", "booking_id": booking_id},
+                            prompt_text=(
                                 f"<b>Установить депозит</b>\nБронь #{booking_id}\n\n"
                                 "Напишите сумму депозита целым числом."
                             ),
@@ -775,15 +768,15 @@ def tg_webhook_impl():
                     )
 
                     prompt_markup = {"force_reply": True, "selective": True}
-                    prompt_msg_id = tg_send_message(chat_id, prompt_text, reply_markup=prompt_markup)
-
-                    expires = (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds")
-                    conn.execute(
-                        """
-                        INSERT INTO pending_replies (kind, booking_id, phone_e164, chat_id, actor_tg_id, prompt_message_id, expires_at)
-                        VALUES ('guest_note', ?, ?, ?, ?, ?, ?)
-                        """,
-                        (booking_id, phone, chat_id, actor_id, str(prompt_msg_id), expires),
+                    start_pending_prompt(
+                        conn,
+                        event_type=TG_GUEST_NOTE_EVENT_TYPE,
+                        chat_id=chat_id,
+                        actor_id=actor_id,
+                        booking_id=int(booking_id),
+                        payload={"guest_phone_e164": phone},
+                        prompt_text=prompt_text,
+                        reply_markup=prompt_markup,
                     )
 
                     safe_answer_callback(cq_id, "Ожидаю текст")
@@ -928,326 +921,299 @@ def tg_webhook_impl():
             # ===== Высокий приоритет: ожидание комментария к гостю =====
             # Обрабатывается ДО команд, загрузки афиши и любых других pending-сценариев.
             if text and not cmd:
-                _table_row = conn.execute(
-                    """
-                    SELECT id, booking_id, phone_e164, expires_at
-                    FROM pending_replies
-                    WHERE chat_id=? AND actor_tg_id=? AND kind='table_flow'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (chat_id, actor_id),
-                ).fetchone()
+                _table_row, _table_payload = _load_table_flow_prompt(
+                    conn,
+                    chat_id=chat_id,
+                    actor_id=actor_id,
+                )
                 if _table_row:
-                    _valid = True
-                    try:
-                        _exp = datetime.fromisoformat(str(_table_row["expires_at"]))
-                        if datetime.utcnow() > _exp:
-                            conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
-                            _valid = False
-                    except Exception:
-                        pass
+                    flow = dict(_table_payload or {})
+                    mode = str(flow.get("mode") or "").strip()
+                    booking_id = int(flow.get("booking_id") or 0)
 
-                    if _valid:
-                        flow = _load_pending_reply_payload(_table_row)
-                        mode = str(flow.get("mode") or "").strip()
-                        booking_id = int(_table_row["booking_id"] or 0)
+                    if mode == "assign_table":
+                        table_number = normalize_table_number(text)
+                        if not table_number:
+                            tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
+                            return {"ok": True}
 
-                        if mode == "assign_table":
-                            table_number = normalize_table_number(text)
-                            if not table_number:
-                                tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
-                                return {"ok": True}
+                        booking_row = load_booking_read_model(conn, booking_id)
+                        if not booking_row:
+                            _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                            tg_send_message(chat_id, "Бронь не найдена.")
+                            return {"ok": True}
 
-                            booking_row = load_booking_read_model(conn, booking_id)
-                            if not booking_row:
-                                conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
-                                tg_send_message(chat_id, "Бронь не найдена.")
-                                return {"ok": True}
+                        conflicts = get_table_assignment_conflicts(conn, booking_row, table_number, exclude_booking_id=booking_id)
+                        if conflicts["booking_conflicts"] or conflicts["restricted"]:
+                            _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                            tg_send_message(
+                                chat_id,
+                                _format_table_conflict_message(conflicts, table_number),
+                                reply_markup={
+                                    "inline_keyboard": [[
+                                        {
+                                            "text": f"⚠️ Override стол #{table_number}",
+                                            "callback_data": f"b:{booking_id}:table:assign_override:{table_number}",
+                                        }
+                                    ]]
+                                },
+                            )
+                            return {"ok": True}
 
-                            conflicts = get_table_assignment_conflicts(conn, booking_row, table_number, exclude_booking_id=booking_id)
-                            if conflicts["booking_conflicts"] or conflicts["restricted"]:
-                                conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
-                                tg_send_message(
-                                    chat_id,
-                                    _format_table_conflict_message(conflicts, table_number),
-                                    reply_markup={
-                                        "inline_keyboard": [[
-                                            {
-                                                "text": f"⚠️ Override стол #{table_number}",
-                                                "callback_data": f"b:{booking_id}:table:assign_override:{table_number}",
-                                            }
-                                        ]]
+                        result = assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name)
+                        _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                        _sync_admin_booking_card(conn, booking_id)
+                        try:
+                            send_booking_event(
+                                conn,
+                                booking_id,
+                                "BOOKING_TABLE_UPDATED",
+                                {
+                                    "actor_tg_id": actor_id,
+                                    "actor_name": actor_name,
+                                    "payload": {
+                                        "action": "assign_table",
+                                        "table_number": result["table_number"],
                                     },
-                                )
-                                return {"ok": True}
+                                    "table_number": result["table_number"],
+                                },
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            notify_waiters_about_deposit_booking(conn, booking_id)
+                        except Exception:
+                            traceback.print_exc()
+                        tg_send_message(chat_id, f"✅ Стол #{result['table_number']} назначен к брони #{booking_id}.")
+                        return {"ok": True}
 
-                            result = assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name)
-                            conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
+                    if mode == "set_deposit":
+                        try:
+                            deposit = set_booking_deposit(conn, booking_id, text, actor_id, actor_name)
+                        except ValueError:
+                            tg_send_message(chat_id, "Сумма депозита должна быть положительным целым числом.")
+                            return {"ok": True}
+
+                        _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                        _sync_admin_booking_card(conn, booking_id)
+                        try:
+                            send_booking_event(
+                                conn,
+                                booking_id,
+                                "BOOKING_DEPOSIT_SET",
+                                {
+                                    "actor_tg_id": actor_id,
+                                    "actor_name": actor_name,
+                                    "payload": {
+                                        "action": "set_deposit",
+                                        "deposit_amount": deposit["deposit_amount"],
+                                        "deposit_comment": deposit["deposit_comment"],
+                                    },
+                                },
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            notify_waiters_about_deposit_booking(conn, booking_id)
+                        except Exception:
+                            traceback.print_exc()
+                        booking_state = load_booking_read_model(conn, booking_id)
+                        if booking_state and not booking_state["assigned_table_number"]:
+                            _start_table_flow_prompt(
+                                conn,
+                                booking_id=booking_id,
+                                chat_id=chat_id,
+                                actor_id=actor_id,
+                                payload={"mode": "assign_table", "booking_id": booking_id},
+                                prompt_text=(
+                                    f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.\n\n"
+                                    "Чтобы информация ушла в группу официантов, у брони должны быть и депозит, и стол.\n"
+                                    "Ответьте на это сообщение номером стола."
+                                ),
+                            )
+                            return {"ok": True}
+                        tg_send_message(chat_id, f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.")
+                        return {"ok": True}
+
+                    if mode in {"restrict_number", "manual_restrict_number"}:
+                        table_number = normalize_table_number(text)
+                        if not table_number:
+                            tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
+                            return {"ok": True}
+
+                        _start_table_flow_prompt(
+                            conn,
+                            booking_id=booking_id,
+                            chat_id=chat_id,
+                            actor_id=actor_id,
+                            payload={
+                                "mode": "restrict_until",
+                                "booking_id": booking_id,
+                                "table_number": table_number,
+                                "force_override": bool(flow.get("force_override")),
+                            },
+                            prompt_text=(
+                                "<b>Ограничение стола</b>\n"
+                                + (f"Бронь #{booking_id}\n" if booking_id else "")
+                                + f"Стол #{table_number}\n\n"
+                                "Напишите, на сколько часов поставить ограничение.\n"
+                                "Пример: <code>2</code> или <code>5</code>"
+                            ).strip(),
+                        )
+                        return {"ok": True}
+
+                    if mode == "restrict_until":
+                        table_number = normalize_table_number(flow.get("table_number"))
+                        restricted_until = parse_restriction_until(text)
+                        if not table_number:
+                            _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                            tg_send_message(chat_id, "Не удалось определить стол. Начните заново.")
+                            return {"ok": True}
+
+                        if not restricted_until:
+                            tg_send_message(chat_id, "Нужно указать положительное число часов. Пример: 3")
+                            return {"ok": True}
+
+                        try:
+                            result = set_table_label(
+                                conn,
+                                table_number,
+                                "RESTRICTED",
+                                actor_id,
+                                actor_name,
+                                restricted_until=restricted_until,
+                                booking_id=booking_id or None,
+                                force_override=bool(flow.get("force_override")),
+                            )
+                        except ValueError as exc:
+                            if str(exc) == "table_conflict":
+                                _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                                if booking_id:
+                                    tg_send_message(
+                                        chat_id,
+                                        f"⚠️ Для стола #{table_number} есть конфликт. Подтвердите override кнопкой ниже.",
+                                        reply_markup={
+                                            "inline_keyboard": [[
+                                                {
+                                                    "text": f"⚠️ Override restriction #{table_number}",
+                                                    "callback_data": f"b:{booking_id}:table:restrict_override:{table_number}",
+                                                }
+                                            ]]
+                                        },
+                                    )
+                                else:
+                                    tg_send_message(
+                                        chat_id,
+                                        "⚠️ Для этого стола есть конфликтующая бронь. Повторите команду позже или используйте CRM для ручного override.",
+                                    )
+                                return {"ok": True}
+                            raise
+
+                        _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                        if booking_id:
                             _sync_admin_booking_card(conn, booking_id)
                             try:
                                 send_booking_event(
                                     conn,
                                     booking_id,
-                                    "BOOKING_TABLE_UPDATED",
+                                    "BOOKING_TABLE_RESTRICTED",
                                     {
                                         "actor_tg_id": actor_id,
                                         "actor_name": actor_name,
                                         "payload": {
-                                            "action": "assign_table",
+                                            "action": "restrict_table",
                                             "table_number": result["table_number"],
+                                            "restricted_until": result["restricted_until"],
                                         },
                                         "table_number": result["table_number"],
                                     },
                                 )
                             except Exception:
                                 pass
-                            try:
-                                notify_waiters_about_deposit_booking(conn, booking_id)
-                            except Exception:
-                                traceback.print_exc()
-                            tg_send_message(chat_id, f"✅ Стол #{result['table_number']} назначен к брони #{booking_id}.")
-                            return {"ok": True}
-
-                        if mode == "set_deposit":
-                            try:
-                                deposit = set_booking_deposit(conn, booking_id, text, actor_id, actor_name)
-                            except ValueError:
-                                tg_send_message(chat_id, "Сумма депозита должна быть положительным целым числом.")
-                                return {"ok": True}
-
-                            conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
-                            _sync_admin_booking_card(conn, booking_id)
-                            try:
-                                send_booking_event(
-                                    conn,
-                                    booking_id,
-                                    "BOOKING_DEPOSIT_SET",
-                                    {
-                                        "actor_tg_id": actor_id,
-                                        "actor_name": actor_name,
-                                        "payload": {
-                                            "action": "set_deposit",
-                                            "deposit_amount": deposit["deposit_amount"],
-                                            "deposit_comment": deposit["deposit_comment"],
-                                        },
-                                    },
-                                )
-                            except Exception:
-                                pass
-                            try:
-                                notify_waiters_about_deposit_booking(conn, booking_id)
-                            except Exception:
-                                traceback.print_exc()
-                            booking_state = load_booking_read_model(conn, booking_id)
-                            if booking_state and not booking_state["assigned_table_number"]:
-                                _create_pending_reply(
-                                    conn,
-                                    "table_flow",
-                                    booking_id,
-                                    chat_id,
-                                    actor_id,
-                                    {"mode": "assign_table", "booking_id": booking_id},
-                                    (
-                                        f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.\n\n"
-                                        "Чтобы информация ушла в группу официантов, у брони должны быть и депозит, и стол.\n"
-                                        "Ответьте на это сообщение номером стола."
-                                    ),
-                                )
-                                return {"ok": True}
-                            tg_send_message(chat_id, f"✅ Депозит {deposit['deposit_amount']} сохранён для брони #{booking_id}.")
-                            return {"ok": True}
-
-                        if mode in {"restrict_number", "manual_restrict_number"}:
-                            table_number = normalize_table_number(text)
-                            if not table_number:
-                                tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
-                                return {"ok": True}
-
-                            flow["table_number"] = table_number
-                            flow["mode"] = "restrict_until"
-                            conn.execute(
-                                "UPDATE pending_replies SET phone_e164=?, expires_at=? WHERE id=?",
-                                (
-                                    json.dumps(flow, ensure_ascii=False),
-                                    (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds"),
-                                    _table_row["id"],
-                                ),
-                            )
-                            target = f"Бронь #{booking_id}\n" if booking_id else ""
-                            tg_send_message(
-                                chat_id,
-                                (
-                                    "<b>Ограничение стола</b>\n"
-                                    f"{target}Стол #{table_number}\n\n"
-                                    "Напишите, на сколько часов поставить ограничение.\n"
-                                    "Пример: <code>2</code> или <code>5</code>"
-                                ).strip(),
-                            )
-                            return {"ok": True}
-
-                        if mode == "restrict_until":
-                            table_number = normalize_table_number(flow.get("table_number"))
-                            restricted_until = parse_restriction_until(text)
-                            if not table_number:
-                                conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
-                                tg_send_message(chat_id, "Не удалось определить стол. Начните заново.")
-                                return {"ok": True}
-                            if not restricted_until:
-                                tg_send_message(chat_id, "Нужно указать положительное число часов. Пример: 3")
-                                return {"ok": True}
-
-                            try:
-                                result = set_table_label(
-                                    conn,
-                                    table_number,
-                                    "RESTRICTED",
-                                    actor_id,
-                                    actor_name,
-                                    restricted_until=restricted_until,
-                                    booking_id=booking_id or None,
-                                    force_override=bool(flow.get("force_override")),
-                                )
-                            except ValueError as exc:
-                                if str(exc) == "table_conflict":
-                                    conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
-                                    if booking_id:
-                                        tg_send_message(
-                                            chat_id,
-                                            f"⚠️ Для стола #{table_number} есть конфликт. Подтвердите override кнопкой ниже.",
-                                            reply_markup={
-                                                "inline_keyboard": [[
-                                                    {
-                                                        "text": f"⚠️ Override restriction #{table_number}",
-                                                        "callback_data": f"b:{booking_id}:table:restrict_override:{table_number}",
-                                                    }
-                                                ]]
-                                            },
-                                        )
-                                    else:
-                                        tg_send_message(
-                                            chat_id,
-                                            "⚠️ Для этого стола есть конфликтующая бронь. Повторите команду позже или используйте CRM для ручного override.",
-                                        )
-                                    return {"ok": True}
-                                raise
-
-                            conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
-                            if booking_id:
-                                _sync_admin_booking_card(conn, booking_id)
-                                try:
-                                    send_booking_event(
-                                        conn,
-                                        booking_id,
-                                        "BOOKING_TABLE_RESTRICTED",
-                                        {
-                                            "actor_tg_id": actor_id,
-                                            "actor_name": actor_name,
-                                            "payload": {
-                                                "action": "restrict_table",
-                                                "table_number": result["table_number"],
-                                                "restricted_until": result["restricted_until"],
-                                            },
-                                            "table_number": result["table_number"],
-                                        },
-                                    )
-                                except Exception:
-                                    pass
-                            else:
-                                try:
-                                    send_table_event(
-                                        conn,
-                                        result["table_number"],
-                                        "TABLE_RESTRICTED",
-                                        {
-                                            "actor_tg_id": actor_id,
-                                            "actor_name": actor_name,
-                                            "payload": {
-                                                "action": "restrict_table",
-                                                "table_number": result["table_number"],
-                                                "restricted_until": result["restricted_until"],
-                                            },
-                                        },
-                                    )
-                                except Exception:
-                                    pass
-                            tg_send_message(
-                                chat_id,
-                                f"✅ Стол #{result['table_number']} ограничен до <code>{_h(_display_restriction_time(result['restricted_until']))}</code>.",
-                            )
-                            return {"ok": True}
-
-                        if mode == "clear_restriction":
-                            table_number = normalize_table_number(text)
-                            if not table_number:
-                                tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
-                                return {"ok": True}
-
-                            result = set_table_label(conn, table_number, "NONE", actor_id, actor_name)
-                            conn.execute("DELETE FROM pending_replies WHERE id=?", (_table_row["id"],))
+                        else:
                             try:
                                 send_table_event(
                                     conn,
                                     result["table_number"],
-                                    "TABLE_LABEL_CLEARED",
+                                    "TABLE_RESTRICTED",
                                     {
                                         "actor_tg_id": actor_id,
                                         "actor_name": actor_name,
                                         "payload": {
-                                            "action": "clear_restriction",
+                                            "action": "restrict_table",
                                             "table_number": result["table_number"],
+                                            "restricted_until": result["restricted_until"],
                                         },
                                     },
                                 )
                             except Exception:
                                 pass
-                            tg_send_message(chat_id, f"✅ Ограничение со стола #{result['table_number']} снято.")
+                        tg_send_message(
+                            chat_id,
+                            f"✅ Стол #{result['table_number']} ограничен до <code>{_h(_display_restriction_time(result['restricted_until']))}</code>.",
+                        )
+                        return {"ok": True}
+
+                    if mode == "clear_restriction":
+                        table_number = normalize_table_number(text)
+                        if not table_number:
+                            tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
                             return {"ok": True}
 
-                _note_row = conn.execute(
-                    """
-                    SELECT id, booking_id, phone_e164, expires_at
-                    FROM pending_replies
-                    WHERE chat_id=? AND actor_tg_id=? AND kind='guest_note'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (chat_id, actor_id),
-                ).fetchone()
-                if _note_row:
-                    _valid = True
-                    try:
-                        _exp = datetime.fromisoformat(str(_note_row["expires_at"]))
-                        if datetime.utcnow() > _exp:
-                            conn.execute("DELETE FROM pending_replies WHERE id=?", (_note_row["id"],))
-                            _valid = False
-                    except Exception:
-                        pass
-                    if _valid:
-                        booking_id = int(_note_row["booking_id"])
-                        phone = str(_note_row["phone_e164"] or "")
-
-                        add_guest_note(conn, phone, text, actor_id, actor_name)
-                        conn.execute("DELETE FROM pending_replies WHERE id=?", (_note_row["id"],))
-
+                        result = set_table_label(conn, table_number, "NONE", actor_id, actor_name)
+                        _complete_table_flow_prompt(conn, int(_table_row["id"]))
                         try:
-                            _sync_admin_booking_card(conn, booking_id)
-                        except Exception:
-                            pass
-
-                        tg_send_message(chat_id, "Комментарий к гостю сохранён.")
-                        try:
-                            send_booking_event(
+                            send_table_event(
                                 conn,
-                                booking_id,
-                                "BOOKING_NOTE_ADDED",
+                                result["table_number"],
+                                "TABLE_LABEL_CLEARED",
                                 {
                                     "actor_tg_id": actor_id,
                                     "actor_name": actor_name,
-                                    "guest_note": text,
+                                    "payload": {
+                                        "action": "clear_restriction",
+                                        "table_number": result["table_number"],
+                                    },
                                 },
                             )
                         except Exception:
                             pass
+                        tg_send_message(chat_id, f"✅ Ограничение со стола #{result['table_number']} снято.")
                         return {"ok": True}
+
+                _note_row, _note_payload = load_pending_prompt(
+                    conn,
+                    event_type=TG_GUEST_NOTE_EVENT_TYPE,
+                    chat_id=chat_id,
+                    actor_id=actor_id,
+                )
+                if _note_row:
+                    booking_id = int(_note_payload.get("booking_id") or 0)
+                    phone = str(_note_payload.get("guest_phone_e164") or "").strip()
+
+                    add_guest_note(conn, phone, text, actor_id, actor_name)
+                    complete_pending_prompt(conn, int(_note_row["id"]))
+
+                    try:
+                        _sync_admin_booking_card(conn, booking_id)
+                    except Exception:
+                        pass
+
+                    tg_send_message(chat_id, "Комментарий к гостю сохранён.")
+                    try:
+                        send_booking_event(
+                            conn,
+                            booking_id,
+                            "BOOKING_NOTE_ADDED",
+                            {
+                                "actor_tg_id": actor_id,
+                                "actor_name": actor_name,
+                                "guest_note": text,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    return {"ok": True}
 
             if cmd == "/start":
                 parts = text.split()
@@ -1607,14 +1573,13 @@ def tg_webhook_impl():
                     tg_send_message(chat_id, "Команда доступна только в рабочем контуре.")
                     return {"ok": True}
 
-                _create_pending_reply(
+                _start_table_flow_prompt(
                     conn,
-                    "table_flow",
-                    0,
-                    chat_id,
-                    actor_id,
-                    {"mode": "manual_restrict_number"},
-                    (
+                    booking_id=0,
+                    chat_id=chat_id,
+                    actor_id=actor_id,
+                    payload={"mode": "manual_restrict_number"},
+                    prompt_text=(
                         "<b>Ограничение стола</b>\n\n"
                         "Напишите номер стола, который нужно ограничить."
                     ),
@@ -1626,14 +1591,13 @@ def tg_webhook_impl():
                     tg_send_message(chat_id, "Команда доступна только в рабочем контуре.")
                     return {"ok": True}
 
-                _create_pending_reply(
+                _start_table_flow_prompt(
                     conn,
-                    "table_flow",
-                    0,
-                    chat_id,
-                    actor_id,
-                    {"mode": "clear_restriction"},
-                    (
+                    booking_id=0,
+                    chat_id=chat_id,
+                    actor_id=actor_id,
+                    payload={"mode": "clear_restriction"},
+                    prompt_text=(
                         "<b>Снять ограничение</b>\n\n"
                         "Напишите номер стола, с которого нужно снять ограничение."
                     ),
@@ -1660,18 +1624,14 @@ def tg_webhook_impl():
                     return {"ok": True}
 
                 # Создаём запись ожидания загрузки афиши
-                prompt_msg_id = tg_send_message(
-                    chat_id,
-                    "📸 <b>Загрузка афиши DJ</b>\n\nОтправьте картинку с афишей на неделю."
-                )
-
-                expires = (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds")
-                conn.execute(
-                    """
-                    INSERT INTO pending_replies (kind, booking_id, phone_e164, chat_id, actor_tg_id, prompt_message_id, expires_at)
-                    VALUES ('lineup_upload', 0, '', ?, ?, ?, ?)
-                    """,
-                    (chat_id, actor_id, str(prompt_msg_id), expires),
+                start_pending_prompt(
+                    conn,
+                    event_type=TG_LINEUP_UPLOAD_EVENT_TYPE,
+                    chat_id=chat_id,
+                    actor_id=actor_id,
+                    booking_id=0,
+                    payload={},
+                    prompt_text="📸 <b>Загрузка афиши DJ</b>\n\nОтправьте картинку с афишей на неделю.",
                 )
                 conn.commit()
                 return {"ok": True}
@@ -1695,26 +1655,14 @@ def tg_webhook_impl():
             photo = m.get("photo")
             if photo:
                 # Проверяем есть ли pending для lineup_upload
-                pending_row = conn.execute(
-                    """
-                    SELECT id, expires_at
-                    FROM pending_replies
-                    WHERE actor_tg_id=? AND kind='lineup_upload'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (actor_id,),
-                ).fetchone()
+                pending_row, _lineup_payload = load_pending_prompt(
+                    conn,
+                    event_type=TG_LINEUP_UPLOAD_EVENT_TYPE,
+                    chat_id=chat_id,
+                    actor_id=actor_id,
+                )
 
                 if pending_row:
-                    try:
-                        exp = datetime.fromisoformat(str(pending_row["expires_at"]))
-                        if datetime.utcnow() > exp:
-                            conn.execute("DELETE FROM pending_replies WHERE id=?", (pending_row["id"],))
-                            conn.commit()
-                            return {"ok": True}
-                    except Exception:
-                        pass
-
                     # Берём лучшее качество (последний элемент массива)
                     file_id = photo[-1].get("file_id")
 
@@ -1735,23 +1683,19 @@ def tg_webhook_impl():
                         (file_id, caption, actor_id),
                     )
 
-                    # Удаляем pending
-                    conn.execute("DELETE FROM pending_replies WHERE id=?", (pending_row["id"],))
+                    complete_pending_prompt(conn, int(pending_row["id"]))
 
                     tg_send_message(chat_id, "✅ Афиша сохранена!")
                     conn.commit()
                     return {"ok": True}
 
             if not photo and actor_id in PROMO_ADMIN_IDS:
-                pending_lineup = conn.execute(
-                    """
-                    SELECT id
-                    FROM pending_replies
-                    WHERE actor_tg_id=? AND kind='lineup_upload'
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (actor_id,),
-                ).fetchone()
+                pending_lineup, _pending_lineup_payload = load_pending_prompt(
+                    conn,
+                    event_type=TG_LINEUP_UPLOAD_EVENT_TYPE,
+                    chat_id=chat_id,
+                    actor_id=actor_id,
+                )
                 if pending_lineup and not cmd:
                     tg_send_message(chat_id, "Пожалуйста, отправьте изображение афиши (как фото).")
                     return {"ok": True}

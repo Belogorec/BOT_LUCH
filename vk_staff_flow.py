@@ -2,7 +2,6 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from core_sync import sync_booking_to_core
 from booking_service import (
     assign_table_to_booking,
     clear_booking_deposit,
@@ -12,14 +11,20 @@ from booking_service import (
     mark_booking_cancelled,
     normalize_table_number,
     parse_restriction_until,
+    resolve_core_reservation_id,
     set_booking_status,
     set_booking_deposit,
     set_table_label,
 )
 from crm_sync import send_booking_event, send_table_event
+from integration_service import create_outbox_message, mark_inbound_event_processed, record_inbound_event
+from outbox_dispatcher import dispatch_outbox_message
 from vk_api import vk_send_message
 from waiter_notify import notify_waiters_about_deposit_booking
-from integration_service import record_inbound_event
+
+
+VK_PENDING_EVENT_TYPE = "vk_staff_pending_prompt"
+VK_PROMPT_OUTBOX_TYPE = "vk_staff_prompt"
 
 
 def _vk_actor_id(from_id: object) -> str:
@@ -133,54 +138,117 @@ def send_vk_booking_card(conn, peer_id: int, booking_id: int) -> None:
     vk_send_message(int(peer_id), render_vk_booking_message(conn, booking_id), keyboard=build_vk_booking_keyboard(booking_id))
 
 
+def _resolve_core_reservation_id(conn, booking_id: int) -> Optional[int]:
+    return resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=True)
+
+
+def _send_vk_prompt(conn, *, peer_id: object, text: str) -> str:
+    outbox_id = create_outbox_message(
+        conn,
+        reservation_id=None,
+        platform="vk",
+        bot_scope="hostess",
+        message_type=VK_PROMPT_OUTBOX_TYPE,
+        payload={"text": str(text or "").strip()},
+        target_external_id=str(peer_id or "").strip(),
+    )
+    result = dispatch_outbox_message(conn, outbox_id)
+    if not result.get("ok"):
+        raise RuntimeError(str(result.get("error") or "vk_prompt_dispatch_failed"))
+    return str(result.get("provider_message_id") or "")
+
+
+def _mark_active_vk_pending_events(conn, *, peer_id: object, from_id: object, status: str, error_text: str = "") -> None:
+    rows = conn.execute(
+        """
+        SELECT id
+        FROM bot_inbound_events
+        WHERE platform = 'vk'
+          AND bot_scope = 'hostess'
+          AND event_type = ?
+          AND actor_external_id = ?
+          AND peer_external_id = ?
+          AND processing_status = 'pending'
+        ORDER BY id ASC
+        """,
+        (VK_PENDING_EVENT_TYPE, str(from_id or ""), str(peer_id or "")),
+    ).fetchall()
+    for row in rows:
+        mark_inbound_event_processed(conn, int(row["id"]), status=status, error_text=error_text)
+
+
 def _save_vk_pending_action(conn, *, peer_id: object, from_id: object, booking_id: int, mode: str, extra: Optional[dict[str, Any]] = None) -> None:
-    payload = {"mode": mode, "booking_id": int(booking_id), **(extra or {})}
-    expires_at = (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds")
+    payload = {
+        "mode": mode,
+        "booking_id": int(booking_id),
+        "expires_at": (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds"),
+        **(extra or {}),
+    }
+    _mark_active_vk_pending_events(
+        conn,
+        peer_id=peer_id,
+        from_id=from_id,
+        status="superseded",
+        error_text="replaced_by_newer_prompt",
+    )
+    event_id = record_inbound_event(
+        conn,
+        platform="vk",
+        bot_scope="hostess",
+        event_type=VK_PENDING_EVENT_TYPE,
+        payload=payload,
+        actor_external_id=str(from_id or ""),
+        actor_display_name=_vk_actor_name(from_id),
+        peer_external_id=str(peer_id or ""),
+        reservation_id=_resolve_core_reservation_id(conn, int(booking_id)),
+    )
     conn.execute(
         """
-        INSERT INTO pending_replies (kind, booking_id, phone_e164, chat_id, actor_tg_id, prompt_message_id, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        UPDATE bot_inbound_events
+        SET processing_status = 'pending',
+            error_text = NULL,
+            processed_at = NULL
+        WHERE id = ?
         """,
-        (
-            "vk_staff_flow",
-            int(booking_id),
-            json.dumps(payload, ensure_ascii=False),
-            str(peer_id or ""),
-            str(from_id or ""),
-            f"vk:{mode}",
-            expires_at,
-        ),
+        (int(event_id),),
     )
 
 
 def _load_vk_pending_action(conn, *, peer_id: object, from_id: object):
     row = conn.execute(
         """
-        SELECT id, booking_id, phone_e164, expires_at
-        FROM pending_replies
-        WHERE kind='vk_staff_flow' AND chat_id=? AND actor_tg_id=?
+        SELECT id, reservation_id, payload_json
+        FROM bot_inbound_events
+        WHERE platform = 'vk'
+          AND bot_scope = 'hostess'
+          AND event_type = ?
+          AND peer_external_id = ?
+          AND actor_external_id = ?
+          AND processing_status = 'pending'
         ORDER BY id DESC LIMIT 1
         """,
-        (str(peer_id or ""), str(from_id or "")),
+        (VK_PENDING_EVENT_TYPE, str(peer_id or ""), str(from_id or "")),
     ).fetchone()
     if not row:
         return None, {}
     try:
-        exp = datetime.fromisoformat(str(row["expires_at"]))
+        payload = json.loads(row["payload_json"] or "{}")
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+    try:
+        exp = datetime.fromisoformat(str(payload.get("expires_at") or ""))
         if datetime.utcnow() > exp:
-            conn.execute("DELETE FROM pending_replies WHERE id=?", (row["id"],))
+            mark_inbound_event_processed(conn, int(row["id"]), status="expired", error_text="expired_before_use")
             return None, {}
     except Exception:
         pass
-    try:
-        payload = json.loads(row["phone_e164"] or "{}")
-    except Exception:
-        payload = {}
     return row, payload if isinstance(payload, dict) else {}
 
 
 def _clear_vk_pending_action(conn, row_id: int) -> None:
-    conn.execute("DELETE FROM pending_replies WHERE id=?", (int(row_id),))
+    mark_inbound_event_processed(conn, int(row_id), status="processed")
 
 
 def _booking_action_message(prefix: str, body: str) -> str:
@@ -251,12 +319,12 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
 
     if action == "prompt_assign_table":
         _save_vk_pending_action(conn, peer_id=peer_id, from_id=from_id, booking_id=booking_id, mode="assign_table")
-        vk_send_message(peer, f"Бронь #{booking_id}\nНапиши номер стола одним сообщением.")
+        _send_vk_prompt(conn, peer_id=peer_id, text=f"Бронь #{booking_id}\nНапиши номер стола одним сообщением.")
         return True
 
     if action == "prompt_set_deposit":
         _save_vk_pending_action(conn, peer_id=peer_id, from_id=from_id, booking_id=booking_id, mode="set_deposit")
-        vk_send_message(peer, f"Бронь #{booking_id}\nНапиши сумму депозита одним сообщением.")
+        _send_vk_prompt(conn, peer_id=peer_id, text=f"Бронь #{booking_id}\nНапиши сумму депозита одним сообщением.")
         return True
 
     if action == "prompt_restrict_table":
@@ -264,7 +332,7 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
         table_number = normalize_table_number(booking_row["assigned_table_number"] if booking_row else None)
         if not table_number:
             _save_vk_pending_action(conn, peer_id=peer_id, from_id=from_id, booking_id=booking_id, mode="restrict_table_number")
-            vk_send_message(peer, f"Бронь #{booking_id}\nСначала напиши номер стола для ограничения.")
+            _send_vk_prompt(conn, peer_id=peer_id, text=f"Бронь #{booking_id}\nСначала напиши номер стола для ограничения.")
         else:
             _save_vk_pending_action(
                 conn,
@@ -274,7 +342,7 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
                 mode="restrict_table_hours",
                 extra={"table_number": table_number},
             )
-            vk_send_message(peer, f"Бронь #{booking_id}\nСтол #{table_number}\nНапиши количество часов ограничения.")
+            _send_vk_prompt(conn, peer_id=peer_id, text=f"Бронь #{booking_id}\nСтол #{table_number}\nНапиши количество часов ограничения.")
         return True
 
     return False
@@ -286,7 +354,7 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
         return False
 
     mode = str(flow.get("mode") or "").strip()
-    booking_id = int(flow.get("booking_id") or pending_row["booking_id"] or 0)
+    booking_id = int(flow.get("booking_id") or 0)
     peer = int(peer_id)
     actor_id = _vk_actor_id(from_id)
     actor_name = _vk_actor_name(from_id)
@@ -340,7 +408,14 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
         booking_state = load_booking_read_model(conn, booking_id)
         if booking_state and not booking_state["assigned_table_number"]:
             _save_vk_pending_action(conn, peer_id=peer_id, from_id=from_id, booking_id=booking_id, mode="assign_table")
-            vk_send_message(peer, f"Депозит {result['deposit_amount']} сохранён для брони #{booking_id}.\nТеперь напиши номер стола, чтобы информация ушла официантам.")
+            _send_vk_prompt(
+                conn,
+                peer_id=peer_id,
+                text=(
+                    f"Депозит {result['deposit_amount']} сохранён для брони #{booking_id}.\n"
+                    "Теперь напиши номер стола, чтобы информация ушла официантам."
+                ),
+            )
             return True
         vk_send_message(peer, f"Депозит {result['deposit_amount']} сохранён для брони #{booking_id}.")
         return True
@@ -350,13 +425,15 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
         if not table_number:
             vk_send_message(peer, "Номер стола должен быть корректным. Например: 221 или 221.1.")
             return True
-        flow["mode"] = "restrict_table_hours"
-        flow["table_number"] = table_number
-        conn.execute(
-            "UPDATE pending_replies SET phone_e164=?, expires_at=? WHERE id=?",
-            (json.dumps(flow, ensure_ascii=False), (datetime.utcnow() + timedelta(minutes=10)).isoformat(timespec="seconds"), pending_row["id"]),
+        _save_vk_pending_action(
+            conn,
+            peer_id=peer_id,
+            from_id=from_id,
+            booking_id=booking_id,
+            mode="restrict_table_hours",
+            extra={"table_number": table_number},
         )
-        vk_send_message(peer, f"Стол #{table_number}\nНапиши количество часов ограничения.")
+        _send_vk_prompt(conn, peer_id=peer_id, text=f"Стол #{table_number}\nНапиши количество часов ограничения.")
         return True
 
     if mode == "restrict_table_hours":

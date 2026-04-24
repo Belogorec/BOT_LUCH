@@ -2,6 +2,7 @@ import json
 from typing import Any, Optional
 
 from config import GUEST_COMM_ENABLED, GUEST_NOTIFICATION_TEST_MODE
+from booking_service import resolve_core_reservation_id
 from integration_service import create_outbox_message
 from local_log import log_event, log_exception
 from outbox_dispatcher import dispatch_outbox_message
@@ -51,24 +52,7 @@ def _log_delivery(
 
 
 def _resolve_core_reservation_id(conn, reservation_id: Optional[int]) -> Optional[int]:
-    rid = int(reservation_id or 0) or None
-    if not rid:
-        return None
-
-    direct = conn.execute("SELECT id FROM reservations WHERE id=?", (rid,)).fetchone()
-    if direct:
-        return int(direct["id"])
-
-    mapped = conn.execute(
-        """
-        SELECT id
-        FROM reservations
-        WHERE source='legacy_booking' AND external_ref=?
-        LIMIT 1
-        """,
-        (str(rid),),
-    ).fetchone()
-    return int(mapped["id"]) if mapped else None
+    return resolve_core_reservation_id(conn, int(reservation_id or 0), allow_booking_sync=False)
 
 
 def _load_active_contact_channels(conn, guest_phone_e164: str):

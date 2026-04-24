@@ -110,6 +110,26 @@ def init_integration_schema(conn: sqlite3.Connection):
           ON public_reservation_tokens(public_token);
         CREATE INDEX IF NOT EXISTS idx_public_reservation_tokens_reservation
           ON public_reservation_tokens(reservation_id, token_kind, status);
+
+        CREATE TABLE IF NOT EXISTS channel_binding_tokens (
+          id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+          reservation_id           INTEGER NOT NULL,
+          token_hash               TEXT NOT NULL,
+          guest_phone_e164         TEXT,
+          channel_type             TEXT NOT NULL,
+          status                   TEXT NOT NULL DEFAULT 'active',
+          expires_at               TEXT NOT NULL,
+          used_at                  TEXT,
+          used_by_external_user_id TEXT,
+          created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at               TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (reservation_id) REFERENCES reservations(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_binding_tokens_hash
+          ON channel_binding_tokens(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_channel_binding_tokens_reservation
+          ON channel_binding_tokens(reservation_id, channel_type, status, expires_at);
         """
     )
 

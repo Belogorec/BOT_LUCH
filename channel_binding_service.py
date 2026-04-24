@@ -13,7 +13,8 @@ from config import (
     TG_BOT_USERNAME,
     VK_GUEST_GROUP_ID,
 )
-from booking_service import ensure_public_reservation_token, load_booking_read_model, log_booking_event
+from booking_service import ensure_public_reservation_token, load_booking_read_model, log_booking_event, resolve_core_reservation_id
+from core_sync import sync_booking_to_core
 from local_log import log_event
 
 SUPPORTED_CHANNELS = {"telegram", "vk"}
@@ -40,24 +41,12 @@ def _normalize_channel(channel_type: str) -> str:
 
 
 def _resolve_core_reservation_id(conn, reservation_id: int) -> Optional[int]:
-    rid = int(reservation_id or 0)
-    if rid <= 0:
-        return None
+    return resolve_core_reservation_id(conn, int(reservation_id or 0), allow_booking_sync=False)
 
-    direct = conn.execute("SELECT id FROM reservations WHERE id=?", (rid,)).fetchone()
-    if direct:
-        return int(direct["id"])
 
-    mapped = conn.execute(
-        """
-        SELECT id
-        FROM reservations
-        WHERE source='legacy_booking' AND external_ref=?
-        LIMIT 1
-        """,
-        (str(rid),),
-    ).fetchone()
-    return int(mapped["id"]) if mapped else None
+def _ensure_core_reservation_id(conn, reservation_id: int) -> Optional[int]:
+    resolved = resolve_core_reservation_id(conn, int(reservation_id or 0), allow_booking_sync=True)
+    return int(resolved) if resolved else None
 
 
 def _get_public_reservation_token(conn, reservation_id: int, *, token_kind: str = "guest_access") -> str:
@@ -249,6 +238,94 @@ def _build_booking_token_payload(conn, booking_id: int, reservation_token: str) 
     return payload
 
 
+def _build_booking_token_payload_from_reservation(conn, reservation_id: int, reservation_token: str) -> Optional[dict[str, Any]]:
+    row = conn.execute(
+        """
+        SELECT
+            r.id AS reservation_id,
+            r.external_ref,
+            r.source,
+            r.guest_name,
+            r.guest_phone,
+            r.reservation_at,
+            r.party_size,
+            r.comment,
+            r.deposit_amount,
+            r.deposit_comment,
+            r.status,
+            r.created_at,
+            r.updated_at,
+            rm.formname,
+            rm.tranid,
+            rm.phone_raw,
+            rm.guest_segment,
+            rm.raw_payload_json,
+            rm.utm_source,
+            rm.utm_medium,
+            rm.utm_campaign,
+            rm.utm_content,
+            rm.utm_term,
+            tc.code AS assigned_table_number
+        FROM reservations r
+        LEFT JOIN reservation_metadata rm
+          ON rm.reservation_id = r.id
+        LEFT JOIN reservation_tables rt
+          ON rt.reservation_id = r.id
+         AND rt.released_at IS NULL
+        LEFT JOIN tables_core tc
+          ON tc.id = rt.table_id
+        WHERE r.id = ?
+        ORDER BY rt.id DESC
+        LIMIT 1
+        """,
+        (int(reservation_id),),
+    ).fetchone()
+    if not row:
+        return None
+
+    reservation_at = str(row["reservation_at"] or "").strip()
+    external_ref = str(row["external_ref"] or "").strip()
+    booking_like_id = int(external_ref) if external_ref.isdigit() else int(row["reservation_id"])
+    payload = {
+        "id": booking_like_id,
+        "reservation_id": int(row["reservation_id"]),
+        "name": row["guest_name"],
+        "phone_e164": row["guest_phone"],
+        "phone_raw": row["phone_raw"] or row["guest_phone"],
+        "reservation_date": reservation_at[:10] if reservation_at else None,
+        "reservation_time": reservation_at[11:16] if len(reservation_at) >= 16 else None,
+        "reservation_dt": reservation_at or None,
+        "guests_count": row["party_size"],
+        "comment": row["comment"],
+        "assigned_table_number": row["assigned_table_number"],
+        "deposit_amount": row["deposit_amount"],
+        "deposit_comment": row["deposit_comment"],
+        "status": str(row["status"] or "").strip(),
+        "formname": row["formname"] or row["source"],
+        "source": row["source"],
+        "reservation_token": str(reservation_token or "").strip(),
+        "raw_payload_json": row["raw_payload_json"],
+        "utm_source": row["utm_source"],
+        "utm_medium": row["utm_medium"],
+        "utm_campaign": row["utm_campaign"],
+        "utm_content": row["utm_content"],
+        "utm_term": row["utm_term"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "tranid": row["tranid"],
+        "guest_segment": row["guest_segment"],
+    }
+    prefs = _load_contact_preferences(conn, str(payload.get("phone_e164") or "").strip())
+    payload.update(
+        {
+            "preferred_channel": prefs["preferred_channel"],
+            "service_notifications_enabled": prefs["service_notifications_enabled"],
+            "marketing_notifications_enabled": prefs["marketing_notifications_enabled"],
+        }
+    )
+    return payload
+
+
 def _load_booking_by_reservation_token(conn, reservation_token: str):
     token = str(reservation_token or "").strip()
     if not token:
@@ -268,34 +345,9 @@ def _load_booking_by_reservation_token(conn, reservation_token: str):
         (token,),
     ).fetchone()
     if core_row:
-        external_ref = str(core_row["external_ref"] or "").strip()
-        if external_ref.isdigit():
-            payload = _build_booking_token_payload(conn, int(external_ref), token)
-            if payload:
-                return payload
-
-    legacy_row = conn.execute(
-        """
-        SELECT id
-        FROM bookings
-        WHERE reservation_token = ?
-        LIMIT 1
-        """,
-        (token,),
-    ).fetchone()
-    if not legacy_row:
-        return None
-
-    payload = _build_booking_token_payload(conn, int(legacy_row["id"]), token)
-    if payload:
-        core_reservation_id = _resolve_core_reservation_id(conn, int(legacy_row["id"]))
-        if core_reservation_id:
-            ensure_public_reservation_token(
-                conn,
-                reservation_id=core_reservation_id,
-                public_token=token,
-            )
-        return payload
+        payload = _build_booking_token_payload_from_reservation(conn, int(core_row["reservation_id"]), token)
+        if payload:
+            return payload
     return None
 
 
@@ -339,6 +391,9 @@ def create_binding_token(
     booking = load_booking_read_model(conn, int(reservation_id))
     if not booking:
         raise ValueError("booking_not_found")
+    core_reservation_id = _ensure_core_reservation_id(conn, int(reservation_id))
+    if not core_reservation_id:
+        raise ValueError("canonical_reservation_not_found")
 
     phone = str(guest_phone_e164 or booking["phone_e164"] or "").strip()
     raw_token = secrets.token_urlsafe(32)
@@ -347,11 +402,11 @@ def create_binding_token(
 
     conn.execute(
         """
-        INSERT INTO guest_binding_tokens (
+        INSERT INTO channel_binding_tokens (
             token_hash, reservation_id, guest_phone_e164, channel_type, status, expires_at, created_at, updated_at
         ) VALUES (?, ?, ?, ?, 'active', ?, datetime('now'), datetime('now'))
         """,
-        (token_hash, int(reservation_id), phone or None, channel, expires_at),
+        (token_hash, int(core_reservation_id), phone or None, channel, expires_at),
     )
     token_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 
@@ -368,6 +423,7 @@ def create_binding_token(
         "token_id": token_id,
         "expires_at": expires_at,
         "reservation_id": int(reservation_id),
+        "core_reservation_id": int(core_reservation_id),
         "channel_type": channel,
         "guest_phone_e164": phone,
     }
@@ -417,18 +473,7 @@ def get_guest_bindings(conn, guest_phone_e164: str) -> list[dict[str, Any]]:
     ).fetchall()
     if canonical_rows:
         return [dict(r) for r in canonical_rows]
-
-    rows = conn.execute(
-        """
-        SELECT id, guest_phone_e164, channel_type, external_user_id, external_username,
-               external_display_name, status, is_verified, linked_at, created_at, updated_at
-        FROM guest_channel_bindings
-        WHERE guest_phone_e164 = ?
-        ORDER BY datetime(updated_at) DESC, id DESC
-        """,
-        (str(guest_phone_e164 or "").strip(),),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    return []
 
 
 def get_reservation_channel_status(conn, reservation_id: int) -> dict[str, Any]:
@@ -456,17 +501,20 @@ def get_reservation_channel_status(conn, reservation_id: int) -> dict[str, Any]:
 
 
 def list_binding_tokens_for_reservation(conn, reservation_id: int) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        """
-        SELECT id, reservation_id, guest_phone_e164, channel_type, status, expires_at, used_at,
-               used_by_external_user_id, created_at, updated_at
-        FROM guest_binding_tokens
-        WHERE reservation_id = ?
-        ORDER BY id DESC
-        """,
-        (int(reservation_id),),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    core_reservation_id = _resolve_core_reservation_id(conn, int(reservation_id))
+    if core_reservation_id:
+        rows = conn.execute(
+            """
+            SELECT id, reservation_id, guest_phone_e164, channel_type, status, expires_at, used_at,
+                   used_by_external_user_id, created_at, updated_at
+            FROM channel_binding_tokens
+            WHERE reservation_id = ?
+            ORDER BY id DESC
+            """,
+            (int(core_reservation_id),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    return []
 
 
 def _normalize_profile_meta(profile_meta: Optional[dict[str, Any]]) -> dict[str, str]:
@@ -521,6 +569,39 @@ def _upsert_channel_binding(
     return int(row["id"]) if row else 0
 
 
+def _load_canonical_binding_token(conn, *, token_hash: str, channel_type: str):
+    return conn.execute(
+        """
+        SELECT
+            cbt.id,
+            cbt.reservation_id,
+            cbt.guest_phone_e164,
+            cbt.channel_type,
+            cbt.status,
+            cbt.expires_at,
+            cbt.used_at,
+            cbt.used_by_external_user_id,
+            r.external_ref
+        FROM channel_binding_tokens cbt
+        JOIN reservations r
+          ON r.id = cbt.reservation_id
+        WHERE cbt.token_hash=?
+          AND cbt.channel_type=?
+        LIMIT 1
+        """,
+        (token_hash, channel_type),
+    ).fetchone()
+
+
+def _resolve_booking_id_for_binding_token_row(token_row: Any) -> Optional[int]:
+    if not token_row:
+        return None
+    external_ref = str(token_row["external_ref"] or "").strip()
+    if external_ref.isdigit():
+        return int(external_ref)
+    return None
+
+
 def consume_binding_token_once(
     conn,
     *,
@@ -541,7 +622,7 @@ def consume_binding_token_once(
     token_hash = _hash_token(token)
     updated = conn.execute(
         """
-        UPDATE guest_binding_tokens
+        UPDATE channel_binding_tokens
         SET status='used',
             used_at=datetime('now'),
             used_by_external_user_id=?,
@@ -554,15 +635,7 @@ def consume_binding_token_once(
         (ext_uid, token_hash, channel),
     )
 
-    token_row = conn.execute(
-        """
-        SELECT id, reservation_id, guest_phone_e164, channel_type, status, expires_at, used_at, used_by_external_user_id
-        FROM guest_binding_tokens
-        WHERE token_hash=? AND channel_type=?
-        LIMIT 1
-        """,
-        (token_hash, channel),
-    ).fetchone()
+    token_row = _load_canonical_binding_token(conn, token_hash=token_hash, channel_type=channel)
 
     if not token_row:
         log_event("GUEST-BIND", action="consume_failed", channel=channel, reason="token_not_found")
@@ -576,7 +649,7 @@ def consume_binding_token_once(
             if str(token_row["expires_at"]) <= _now_utc_sql():
                 conn.execute(
                     """
-                    UPDATE guest_binding_tokens
+                    UPDATE channel_binding_tokens
                     SET status='expired', updated_at=datetime('now')
                     WHERE id=? AND status='active'
                     """,
@@ -591,7 +664,10 @@ def consume_binding_token_once(
         else:
             return {"ok": False, "error": "token_invalid"}
 
-    reservation_id = int(token_row["reservation_id"])
+    reservation_id = _resolve_booking_id_for_binding_token_row(token_row)
+    if not reservation_id:
+        return {"ok": False, "error": "booking_not_found"}
+
     booking = load_booking_read_model(conn, reservation_id)
     if not booking:
         return {"ok": False, "error": "booking_not_found"}
@@ -615,13 +691,16 @@ def consume_binding_token_once(
         external_user_id=ext_uid,
         profile_meta=profile_meta,
     )
-    binding_id = _upsert_channel_binding(
-        conn,
-        guest_phone_e164=guest_phone,
-        channel_type=channel,
-        external_user_id=ext_uid,
-        profile_meta=profile_meta,
-    )
+    channel_row = conn.execute(
+        """
+        SELECT id
+        FROM contact_channels
+        WHERE platform=? AND external_user_id=?
+        LIMIT 1
+        """,
+        (channel, ext_uid),
+    ).fetchone()
+    contact_channel_id = int(channel_row["id"]) if channel_row else 0
     log_booking_event(
         conn,
         reservation_id,
@@ -630,7 +709,7 @@ def consume_binding_token_once(
         f"{channel}:{ext_uid}",
         {
             "channel_type": channel,
-            "channel_binding_id": binding_id,
+            "contact_channel_id": contact_channel_id or None,
             "guest_phone_e164": guest_phone,
         },
     )
@@ -641,14 +720,15 @@ def consume_binding_token_once(
         token_id=int(token_row["id"]),
         reservation_id=reservation_id,
         channel=channel,
-        binding_id=binding_id,
+        contact_channel_id=contact_channel_id or 0,
+        token_storage="canonical",
     )
     return {
         "ok": True,
         "reservation_id": reservation_id,
         "guest_phone_e164": guest_phone,
         "channel_type": channel,
-        "channel_binding_id": binding_id,
+        "contact_channel_id": contact_channel_id or 0,
     }
 
 

@@ -1,7 +1,9 @@
 from typing import Any, Optional
 
 from config import VK_HOSTESS_PEER_IDS, VK_WAITER_PEER_IDS
+from booking_service import resolve_core_reservation_id
 from integration_service import create_outbox_message
+from integration_service import upsert_bot_peer
 from local_log import log_event, log_exception
 from outbox_dispatcher import dispatch_outbox_message
 from vk_api import vk_api_enabled, vk_send_message
@@ -22,61 +24,53 @@ def upsert_vk_staff_peer(
     if not peer:
         return False
 
-    storage_peer_id = f"{str(bot_key or '').strip() or 'hostess'}:{peer}"
-    existing = conn.execute("SELECT peer_id FROM vk_staff_peers WHERE peer_id = ?", (storage_peer_id,)).fetchone()
-    conn.execute(
+    scope = str(bot_key or "").strip() or "hostess"
+    existing = conn.execute(
         """
-        INSERT INTO vk_staff_peers (
-            peer_id, peer_external_id, bot_key, from_id, is_active, role_hint, last_message_text, last_seen_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 1, ?, ?, datetime('now'), datetime('now'), datetime('now'))
-        ON CONFLICT(peer_id) DO UPDATE SET
-            peer_external_id = excluded.peer_external_id,
-            bot_key = excluded.bot_key,
-            from_id = excluded.from_id,
-            is_active = 1,
-            role_hint = excluded.role_hint,
-            last_message_text = excluded.last_message_text,
-            last_seen_at = datetime('now'),
-            updated_at = datetime('now')
+        SELECT id
+        FROM bot_peers
+        WHERE platform = 'vk' AND bot_scope = ? AND external_peer_id = ?
+        LIMIT 1
         """,
-        (
-            storage_peer_id,
-            peer,
-            str(bot_key or "").strip() or "hostess",
-            sender or None,
-            str(role_hint or "").strip() or None,
-            (message_text or "").strip()[:500] or None,
-        ),
+        (scope, peer),
+    ).fetchone()
+
+    upsert_bot_peer(
+        conn,
+        platform="vk",
+        bot_scope=scope,
+        external_peer_id=peer,
+        external_user_id=sender or None,
+        display_name=str(message_text or role_hint or "").strip()[:255],
     )
     return existing is None
 
 
 def fetch_active_vk_staff_peers(conn, *, bot_key: str) -> list[dict[str, Any]]:
-    rows = conn.execute(
+    canonical_rows = conn.execute(
         """
         SELECT
-            COALESCE(NULLIF(peer_external_id, ''), peer_id) AS peer_id,
-            from_id,
+            external_peer_id AS peer_id,
+            external_user_id AS from_id,
             is_active,
-            role_hint,
-            bot_key,
-            last_message_text,
+            bot_scope AS role_hint,
+            bot_scope AS bot_key,
+            display_name AS last_message_text,
             last_seen_at,
             created_at,
             updated_at
-        FROM vk_staff_peers
-        WHERE is_active = 1 AND bot_key = ?
-        ORDER BY datetime(updated_at) DESC, peer_id DESC
+        FROM bot_peers
+        WHERE platform = 'vk'
+          AND bot_scope = ?
+          AND is_active = 1
+        ORDER BY datetime(updated_at) DESC, external_peer_id DESC
         """,
         (str(bot_key or "").strip() or "hostess",),
     ).fetchall()
 
-    # After the multi-bot migration we can temporarily have both legacy rows
-    # ("2000000001") and namespaced rows ("hostess:2000000001") for the same
-    # VK chat. Keep only the freshest row per external peer to avoid duplicates.
     deduped: list[dict[str, Any]] = []
     seen_peer_ids: set[str] = set()
-    for row in rows:
+    for row in canonical_rows:
         peer_id = str(row["peer_id"] or "").strip()
         if not peer_id or peer_id in seen_peer_ids:
             continue
@@ -128,16 +122,7 @@ def notify_vk_staff_about_new_booking(conn, booking_id: int, *, source: str = ""
         return 0
 
     sent = 0
-    core_row = conn.execute(
-        """
-        SELECT id
-        FROM reservations
-        WHERE source='legacy_booking' AND external_ref=?
-        LIMIT 1
-        """,
-        (str(int(booking_id)),),
-    ).fetchone()
-    core_reservation_id = int(core_row["id"]) if core_row else None
+    core_reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
 
     for peer in peers:
         peer_id = str(peer.get("peer_id") or "").strip()
