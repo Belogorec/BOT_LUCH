@@ -50,8 +50,10 @@ from booking_service import (
     update_booking_guests_count,
 )
 from waiter_notify import notify_waiters_about_deposit_booking
+from embedded_crm_outbox_worker import start_embedded_crm_outbox_worker
 
 app = Flask(__name__)
+start_embedded_crm_outbox_worker()
 
 
 @app.before_request
