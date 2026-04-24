@@ -289,7 +289,7 @@ class MirrorOffSmokeTests(unittest.TestCase):
             ).fetchone()
             outbox_row = conn.execute(
                 """
-                SELECT platform, bot_scope, message_type, target_external_id
+                SELECT platform, bot_scope, message_type, target_external_id, payload_json
                 FROM bot_outbox
                 WHERE reservation_id = ?
                   AND message_type = 'waiter_deposit_notification'
@@ -311,6 +311,7 @@ class MirrorOffSmokeTests(unittest.TestCase):
         self.assertEqual(outbox_row["bot_scope"], "waiter")
         self.assertEqual(outbox_row["message_type"], "waiter_deposit_notification")
         self.assertEqual(outbox_row["target_external_id"], "waiter-smoke-chat")
+        self.assertIn("Smoke deposit", outbox_row["payload_json"])
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ def _build_waiter_message_from_row(row, *, rich_text: bool) -> Optional[str]:
     deposit_amount = row["deposit_amount"]
     if not table_number or not deposit_amount:
         return None
+    comment = str(row["deposit_comment"] or row["comment"] or "").strip()
 
     if rich_text:
         lines = [
@@ -66,12 +67,16 @@ def _build_waiter_message_from_row(row, *, rich_text: bool) -> Optional[str]:
             f"<b>Стол:</b> #{table_number}",
             f"<b>Депозит:</b> {_h(int(deposit_amount))} руб.",
         ]
+        if comment:
+            lines.append(f"<b>Комментарий:</b> {_h(comment)}")
     else:
         lines = [
             "Стол с депозитом",
             f"Стол: #{table_number}",
             f"Депозит: {int(deposit_amount)} руб.",
         ]
+        if comment:
+            lines.append(f"Комментарий: {comment}")
 
     return "\n".join(lines)
 
