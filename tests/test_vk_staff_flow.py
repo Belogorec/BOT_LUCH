@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 
+import booking_service
 import outbox_dispatcher
 from core_schema import run_core_schema_migrations
 from db import init_schema
@@ -17,6 +18,10 @@ from vk_staff_flow import (
 
 class VkStaffFlowTests(unittest.TestCase):
     def setUp(self):
+        self.prev_core_only = booking_service.CORE_ONLY_MODE
+        self.prev_legacy_mirror = booking_service.LEGACY_MIRROR_ENABLED
+        booking_service.CORE_ONLY_MODE = False
+        booking_service.LEGACY_MIRROR_ENABLED = True
         self.tmp = tempfile.NamedTemporaryFile(delete=False)
         self.tmp.close()
         conn = sqlite3.connect(self.tmp.name)
@@ -30,6 +35,8 @@ class VkStaffFlowTests(unittest.TestCase):
             conn.close()
 
     def tearDown(self):
+        booking_service.CORE_ONLY_MODE = self.prev_core_only
+        booking_service.LEGACY_MIRROR_ENABLED = self.prev_legacy_mirror
         try:
             os.unlink(self.tmp.name)
         except FileNotFoundError:

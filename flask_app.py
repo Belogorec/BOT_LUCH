@@ -2,7 +2,7 @@ import re
 import hashlib
 import hmac
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import json
 import urllib.parse
@@ -20,10 +20,14 @@ from dashboard_api import (
 from integration_schema import run_integration_schema_migrations
 from config import (
     BOT_TOKEN,
+    BUSINESS_TZ_OFFSET_HOURS,
     CRM_SYNC_SHARED_SECRET,
     DASHBOARD_CORS_ORIGINS,
+    MINIAPP_MIN_LEAD_MINUTES,
     PUBLIC_CORS_ORIGINS,
+    TELEGRAM_INIT_DATA_MAX_AGE_SEC,
     find_vk_bot_config_by_group_id,
+    validate_security_config,
 )
 from db import connect, run_migrations, seed_discount_codes_from_csv
 from local_log import log_event, log_exception
@@ -53,6 +57,7 @@ from waiter_notify import notify_waiters_about_deposit_booking
 from embedded_crm_outbox_worker import start_embedded_crm_outbox_worker
 
 app = Flask(__name__)
+validate_security_config()
 start_embedded_crm_outbox_worker()
 
 
@@ -87,6 +92,38 @@ def normalize_time_hhmm(v: str) -> str:
     if not (0 <= hh <= 23 and 0 <= mm <= 59):
         return ""
     return f"{hh:02d}:{mm:02d}"
+
+
+def _business_now() -> datetime:
+    return datetime.utcnow() + timedelta(hours=int(BUSINESS_TZ_OFFSET_HOURS or 0))
+
+
+def _normalize_booking_date_iso(value: str) -> str:
+    raw = str(value or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        return ""
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+    return parsed.isoformat()
+
+
+def _validate_miniapp_booking_fields(date_value: str, time_value: str, guests_count: int) -> tuple[bool, str]:
+    if not date_value or not time_value:
+        return False, "Некорректные дата или время"
+    if guests_count < 1 or guests_count > 30:
+        return False, "Некорректное количество гостей"
+
+    try:
+        chosen = datetime.strptime(f"{date_value} {time_value}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return False, "Некорректные дата или время"
+
+    min_allowed = _business_now() + timedelta(minutes=max(0, int(MINIAPP_MIN_LEAD_MINUTES or 20)))
+    if chosen < min_allowed:
+        return False, f"Для ближайшей брони выберите время не раньше чем через {int(MINIAPP_MIN_LEAD_MINUTES or 20)} минут."
+    return True, ""
 
 
 def normalize_phone_e164(raw: str, default_region: str = "RU") -> str:
@@ -179,6 +216,15 @@ def validate_telegram_init_data(init_data_str: str) -> tuple[bool, dict]:
     computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(computed_hash, received_hash):
+        return False, {}
+
+    try:
+        auth_ts = int(str(data.get("auth_date") or "0").strip())
+    except Exception:
+        auth_ts = 0
+    now_ts = int(datetime.utcnow().timestamp())
+    max_age = max(60, int(TELEGRAM_INIT_DATA_MAX_AGE_SEC or 86400))
+    if auth_ts <= 0 or auth_ts > now_ts + 300 or now_ts - auth_ts > max_age:
         return False, {}
 
     user_obj = {}
@@ -1095,8 +1141,8 @@ def api_submit_booking():
   if not tg_user_id:
     return {"ok": False, "error": "Не удалось определить пользователя Telegram"}, 400
 
-  date_value = str(data.get("date") or "").strip()
-  time_value = str(data.get("time") or "").strip()
+  date_value = _normalize_booking_date_iso(str(data.get("date") or "").strip())
+  time_value = normalize_time_hhmm(str(data.get("time") or "").strip())
   guests_value = str(data.get("guests") or "").strip()
   comment_value = str(data.get("comment") or "").strip()
   reservation_token = str(
@@ -1119,6 +1165,9 @@ def api_submit_booking():
     guests_count = 0
   if guests_count <= 0:
     return {"ok": False, "error": "Некорректное количество гостей"}, 400
+  fields_ok, fields_error = _validate_miniapp_booking_fields(date_value, time_value, guests_count)
+  if not fields_ok:
+    return {"ok": False, "error": fields_error}, 400
 
   conn = ensure_db()
   try:

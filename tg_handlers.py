@@ -1,10 +1,8 @@
 import html
 import hashlib
 import json
-import os
 import traceback
 from datetime import datetime, timedelta
-import requests
 
 from flask import request, abort
 
@@ -16,9 +14,7 @@ from config import (
     TG_CHAT_ID,
     WAITER_CHAT_ID,
     BOT_TOKEN,
-    CRM_AUTH_CONFIRM_URL,
-    CRM_AUTH_SHARED_SECRET,
-    CRM_AUTH_TIMEOUT_SEC,
+    MINIAPP_URL,
 )
 from telegram_api import (
     tg_send_message,
@@ -60,11 +56,6 @@ from notification_dispatcher import send_service_notification
 from integration_service import record_inbound_event
 from telegram_pending_prompt import complete_pending_prompt, load_pending_prompt, start_pending_prompt
 
-MINIAPP_URL = os.environ.get(
-    "MINIAPP_URL",
-    "https://botluch-production.up.railway.app/miniapp/reserve",
-).strip()
-
 TG_GUEST_NOTE_EVENT_TYPE = "telegram_guest_note_prompt"
 TG_TABLE_FLOW_EVENT_TYPE = "telegram_table_flow_prompt"
 TG_LINEUP_UPLOAD_EVENT_TYPE = "telegram_lineup_upload_prompt"
@@ -72,48 +63,6 @@ TG_LINEUP_UPLOAD_EVENT_TYPE = "telegram_lineup_upload_prompt"
 
 def _h(s: str) -> str:
     return html.escape(s or "", quote=False)
-
-
-def _normalize_auth_code(raw: str) -> str:
-    code = (raw or "").strip().upper()
-    if not code:
-        return ""
-    if not code.startswith("AUTH-"):
-        code = f"AUTH-{code}"
-    return code
-
-
-def _confirm_crm_auth(code: str, telegram_id: str) -> tuple[bool, str]:
-    if not CRM_AUTH_CONFIRM_URL:
-        return False, "CRM auth URL не настроен"
-    if not CRM_AUTH_SHARED_SECRET:
-        return False, "CRM auth shared secret не настроен"
-
-    try:
-        resp = requests.post(
-            CRM_AUTH_CONFIRM_URL,
-            json={
-                "code": code,
-                "telegram_id": int(telegram_id),
-            },
-            headers={"X-CRM-Auth-Secret": CRM_AUTH_SHARED_SECRET},
-            timeout=max(3, int(CRM_AUTH_TIMEOUT_SEC)),
-        )
-    except Exception as exc:
-        return False, f"ошибка соединения с CRM: {exc}"
-
-    if not resp.ok:
-        return False, f"CRM вернула HTTP {resp.status_code}"
-
-    try:
-        payload = resp.json()
-    except Exception:
-        payload = {}
-
-    if payload.get("ok") is True:
-        return True, "ok"
-
-    return False, str(payload.get("error") or "неподтвержденный или истекший код")
 
 
 def ensure_db():
@@ -389,39 +338,8 @@ def tg_webhook_impl():
                 return {"ok": True}
 
             if data.startswith("promo:redeem:"):
-                code = data.replace("promo:redeem:", "", 1).strip()
-
-                if actor_id not in PROMO_ADMIN_IDS:
-                    safe_answer_callback(cq_id, "Нет доступа")
-                    return {"ok": True}
-
-                row = conn.execute(
-                    "SELECT code, status FROM discount_codes WHERE code=?",
-                    (code,),
-                ).fetchone()
-
-                if not row:
-                    safe_answer_callback(cq_id, "Карта не найдена")
-                    return {"ok": True}
-
-                if row["status"] == "USED":
-                    safe_answer_callback(cq_id, "Карта уже использована")
-                    tg_send_message(chat_id, f"❌ Карта <b>{_h(code)}</b> уже была использована ранее.")
-                    return {"ok": True}
-
-                conn.execute(
-                    """
-                    UPDATE discount_codes
-                    SET status='USED',
-                        redeemed_at=datetime('now'),
-                        redeemed_by_tg_id=?
-                    WHERE code=? AND status='ACTIVE'
-                    """,
-                    (actor_id, code),
-                )
-
-                safe_answer_callback(cq_id, "Скидка проведена")
-                tg_send_message(chat_id, f"✅ Скидка по карте <b>{_h(code)}</b> проведена.")
+                safe_answer_callback(cq_id, "Архивировано")
+                tg_send_message(chat_id, "Подарочные QR-карты сейчас архивированы и не принимаются.")
                 return {"ok": True}
 
             parts = data.split(":")
@@ -1219,26 +1137,11 @@ def tg_webhook_impl():
                 parts = text.split()
 
                 if len(parts) > 1 and parts[1].startswith("auth_"):
-                    code_raw = parts[1].replace("auth_", "", 1)
-                    code = _normalize_auth_code(code_raw)
-                    if not code:
-                        tg_send_message(chat_id, "Код авторизации не распознан. Откройте CRM и получите новый код.")
-                        return {"ok": True}
-
-                    ok, msg = _confirm_crm_auth(code, actor_id)
-                    if ok:
-                        tg_send_message(
-                            chat_id,
-                            "✅ <b>Вход подтвержден</b>\n\n"
-                            "Вернитесь в окно CRM, страница войдет автоматически.",
-                        )
-                    else:
-                        tg_send_message(
-                            chat_id,
-                            "❌ Не удалось подтвердить вход.\n"
-                            f"Причина: <code>{_h(msg)}</code>\n\n"
-                            "Получите новый код в CRM и повторите попытку.",
-                        )
+                    tg_send_message(
+                        chat_id,
+                        "Вход через Telegram больше не используется.\n"
+                        "Откройте CRM и войдите по логину и паролю.",
+                    )
                     return {"ok": True}
 
                 if GUEST_COMM_ENABLED and len(parts) > 1 and parts[1].startswith(TG_BINDING_START_PREFIX):
@@ -1283,10 +1186,6 @@ def tg_webhook_impl():
                     return {"ok": True}
 
                 if len(parts) > 1 and parts[1].startswith("promo_"):
-                    code = parts[1].replace("promo_", "").strip()
-
-                    # Сохраняем параметр /start в истории пользователя ДО проверки статуса
-                    # Так пользователь учитывается даже если QR уже использован
                     conn.execute(
                         """
                         INSERT INTO tg_bot_users (tg_user_id, username, first_name, 
@@ -1309,49 +1208,12 @@ def tg_webhook_impl():
                         (actor_id, tg_username, first_name, parts[1]),
                     )
                     conn.commit()
-
-                    row = conn.execute(
-                        "SELECT code, status FROM discount_codes WHERE code=?",
-                        (code,),
-                    ).fetchone()
-
-                    if not row:
-                        tg_send_message(chat_id, "❌ Эта подарочная карта не найдена.")
-                        return {"ok": True}
-
-                    status = row["status"]
-
-                    if status == "USED":
-                        tg_send_message(chat_id, "❌ Эта подарочная карта уже была использована.")
-                        return {"ok": True}
-
-                    text_msg = (
-                        "🎁 <b>Подарочная карта LUCHBAR</b>\n\n"
-                        "Ваша карта активна.\n\n"
-                        "Скидка: <b>15%</b>\n"
-                        "Действует до: <b>31 марта</b>\n\n"
-                        "Вы можете воспользоваться скидкой "
-                        "один раз, предъявив открытку с QR-кодом официанту.\n\n"
-                        "Будем рады видеть вас в LUCHBAR."
+                    tg_send_message(
+                        chat_id,
+                        "Подарочные QR-карты сейчас архивированы.\n\n"
+                        "Вы можете воспользоваться основным меню LUCHBAR.",
+                        build_luch_main_menu(),
                     )
-
-                    if actor_id in PROMO_ADMIN_IDS:
-                        # Для админов только кнопка "Провести скидку"
-                        kb = {
-                            "inline_keyboard": [
-                                [
-                                    {
-                                        "text": "✅ Провести скидку",
-                                        "callback_data": f"promo:redeem:{code}"
-                                    }
-                                ]
-                            ]
-                        }
-                    else:
-                        # Для гостей меню с основными функциями
-                        kb = build_luch_main_menu()
-
-                    tg_send_message(chat_id, text_msg, kb)
                     return {"ok": True}
 
                 # Проверяем есть ли у пользователя телефон
@@ -1411,28 +1273,11 @@ def tg_webhook_impl():
                 conn.commit()
 
             if cmd == "/auth":
-                parts = text.split(maxsplit=1)
-                code = _normalize_auth_code(parts[1] if len(parts) > 1 else "")
-                if not code:
-                    tg_send_message(
-                        chat_id,
-                        "Используйте формат: <code>/auth AUTH-XXXXXX</code>",
-                    )
-                    return {"ok": True}
-
-                ok, msg = _confirm_crm_auth(code, actor_id)
-                if ok:
-                    tg_send_message(
-                        chat_id,
-                        "✅ <b>Вход подтвержден</b>\n\n"
-                        "Вернитесь в окно CRM, страница войдет автоматически.",
-                    )
-                else:
-                    tg_send_message(
-                        chat_id,
-                        "❌ Не удалось подтвердить вход.\n"
-                        f"Причина: <code>{_h(msg)}</code>",
-                    )
+                tg_send_message(
+                    chat_id,
+                    "Вход через Telegram больше не используется.\n"
+                    "Откройте CRM и войдите по логину и паролю.",
+                )
                 return {"ok": True}
 
             if cmd == "/myid":

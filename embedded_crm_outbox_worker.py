@@ -23,7 +23,7 @@ def _falsy(value: str) -> bool:
 
 
 def _enabled() -> bool:
-    value = os.getenv("CRM_OUTBOX_EMBEDDED_WORKER", "auto")
+    value = os.getenv("CRM_OUTBOX_EMBEDDED_WORKER", "0")
     if _truthy(value):
         return True
     if _falsy(value):

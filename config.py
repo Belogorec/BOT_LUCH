@@ -51,12 +51,16 @@ def _parse_peer_ids(raw: str) -> list[str]:
     return [p for p in parts if p]
 
 
+ALLOW_INSECURE_DEFAULTS = _env_flag("ALLOW_INSECURE_DEFAULTS", default=False)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
 WAITER_CHAT_ID = os.getenv("WAITER_CHAT_ID", os.getenv("WAITERS_CHAT_ID", "-1001763474308")).strip()
 TILDA_SECRET = os.getenv("TILDA_SECRET", "").strip()
 TG_WEBHOOK_SECRET = os.getenv("TG_WEBHOOK_SECRET", "").strip()
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "").strip()
+MINIAPP_URL = os.getenv("MINIAPP_URL", "").strip()
+MINIAPP_MIN_LEAD_MINUTES = int(os.getenv("MINIAPP_MIN_LEAD_MINUTES", "20").strip() or "20")
+TELEGRAM_INIT_DATA_MAX_AGE_SEC = int(os.getenv("TELEGRAM_INIT_DATA_MAX_AGE_SEC", "86400").strip() or "86400")
 DASHBOARD_CORS_ORIGINS = [
     origin.strip()
     for origin in os.getenv("DASHBOARD_CORS_ORIGINS", "").split(",")
@@ -73,12 +77,6 @@ CRM_API_URL = os.getenv("CRM_API_URL", "").strip()
 CRM_API_KEY = os.getenv("CRM_API_KEY", "").strip()
 CRM_SYNC_SHARED_SECRET = os.getenv("CRM_SYNC_SHARED_SECRET", "").strip()
 CRM_SYNC_TIMEOUT = int(os.getenv("CRM_SYNC_TIMEOUT", "8").strip() or "8")
-CRM_AUTH_CONFIRM_URL = os.getenv(
-    "CRM_AUTH_CONFIRM_URL",
-    "https://luchcrm-production.up.railway.app/api/auth/confirm-code",
-).strip()
-CRM_AUTH_SHARED_SECRET = os.getenv("CRM_AUTH_SHARED_SECRET", CRM_SYNC_SHARED_SECRET).strip()
-CRM_AUTH_TIMEOUT_SEC = int(os.getenv("CRM_AUTH_TIMEOUT_SEC", "8").strip() or "8")
 VK_HOSTESS_GROUP_ID = os.getenv("VK_HOSTESS_GROUP_ID", os.getenv("VK_GROUP_ID", "")).strip()
 VK_HOSTESS_ACCESS_TOKEN = os.getenv("VK_HOSTESS_ACCESS_TOKEN", os.getenv("VK_ACCESS_TOKEN", "")).strip()
 VK_HOSTESS_CALLBACK_SECRET = os.getenv("VK_HOSTESS_CALLBACK_SECRET", os.getenv("VK_CALLBACK_SECRET", "")).strip()
@@ -183,3 +181,46 @@ GUEST_PUBLIC_BASE_URL = os.getenv("GUEST_PUBLIC_BASE_URL", "").strip()
 TG_BOT_USERNAME = os.getenv("TG_BOT_USERNAME", "").strip().lstrip("@")
 TG_BINDING_START_PREFIX = os.getenv("TG_BINDING_START_PREFIX", "bind_").strip() or "bind_"
 GUEST_NOTIFICATION_TEST_MODE = _env_flag("GUEST_NOTIFICATION_TEST_MODE", default=False)
+
+
+def _configured(*values: str) -> bool:
+    return any(str(value or "").strip() for value in values)
+
+
+def validate_security_config() -> None:
+    missing: list[str] = []
+
+    for name, value in {
+        "BOT_TOKEN": BOT_TOKEN,
+        "TG_WEBHOOK_SECRET": TG_WEBHOOK_SECRET,
+        "DASHBOARD_SECRET": DASHBOARD_SECRET,
+        "TILDA_SECRET": TILDA_SECRET,
+        "MINIAPP_URL": MINIAPP_URL,
+        "CRM_SYNC_SHARED_SECRET": CRM_SYNC_SHARED_SECRET,
+    }.items():
+        if not value:
+            missing.append(name)
+
+    if CRM_API_URL and not CRM_API_KEY:
+        missing.append("CRM_API_KEY")
+    if CRM_API_KEY and not CRM_API_URL:
+        missing.append("CRM_API_URL")
+
+    for prefix, group_id, access_token, callback_secret, confirmation_token in (
+        ("VK_HOSTESS", VK_HOSTESS_GROUP_ID, VK_HOSTESS_ACCESS_TOKEN, VK_HOSTESS_CALLBACK_SECRET, VK_HOSTESS_CONFIRMATION_TOKEN),
+        ("VK_WAITER", VK_WAITER_GROUP_ID, VK_WAITER_ACCESS_TOKEN, VK_WAITER_CALLBACK_SECRET, VK_WAITER_CONFIRMATION_TOKEN),
+        ("VK_GUEST", VK_GUEST_GROUP_ID, VK_GUEST_ACCESS_TOKEN, VK_GUEST_CALLBACK_SECRET, VK_GUEST_CONFIRMATION_TOKEN),
+    ):
+        if _configured(group_id, access_token, callback_secret, confirmation_token):
+            if not group_id:
+                missing.append(f"{prefix}_GROUP_ID")
+            if not access_token:
+                missing.append(f"{prefix}_ACCESS_TOKEN")
+            if not callback_secret:
+                missing.append(f"{prefix}_CALLBACK_SECRET")
+            if not confirmation_token:
+                missing.append(f"{prefix}_CONFIRMATION_TOKEN")
+
+    if (missing) and not ALLOW_INSECURE_DEFAULTS:
+        details = "missing: " + ", ".join(sorted(set(missing)))
+        raise RuntimeError("Security-critical BOT env is not configured (" + details + ")")

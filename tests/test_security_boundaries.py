@@ -4,8 +4,12 @@ import unittest
 
 
 os.environ["DB_PATH"] = os.path.join(tempfile.gettempdir(), "bot_luch_security_boundaries_test.db")
+os.environ["BOT_TOKEN"] = "123456:test-token"
 os.environ["CRM_SYNC_SHARED_SECRET"] = "crm-test-secret"
 os.environ["DASHBOARD_SECRET"] = "dashboard-test-secret"
+os.environ["MINIAPP_URL"] = "https://bot.example.test/miniapp/reserve"
+os.environ["TG_WEBHOOK_SECRET"] = "tg-test-secret"
+os.environ["TILDA_SECRET"] = "tilda-test-secret"
 
 try:
     from flask import request  # noqa: E402

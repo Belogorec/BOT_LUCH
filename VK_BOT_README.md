@@ -7,7 +7,7 @@
 ## Текущая схема
 
 - основной сервис: `BOT_LUCH`
-- публичный callback URL: `https://botluch-production.up.railway.app/vk/callback`
+- публичный callback URL: `https://<bot-domain>/vk/callback`
 - backend endpoint в коде: `flask_app.py`
 - env-конфиг: `config.py`
 - на одном callback URL теперь можно держать несколько VK-сообществ, роутинг идёт по `group_id`
@@ -70,7 +70,7 @@
 
 ## Текущие рабочие значения для настройки VK
 
-- `URL`: `https://botluch-production.up.railway.app/vk/callback`
+- `URL`: `https://<bot-domain>/vk/callback`
 - `API version`: `5.199`
 
 Секреты и токены не хранить в этом README. Они должны лежать только:
@@ -84,7 +84,7 @@
 
 ## Что заполнять в VK Callback API
 
-- `URL`: `https://botluch-production.up.railway.app/vk/callback`
+- `URL`: `https://<bot-domain>/vk/callback`
 - `Secret key`: значение из `VK_CALLBACK_SECRET`
 - `Confirmation code`: значение из `VK_CONFIRMATION_TOKEN`
 - `Group ID`: значение из `VK_GROUP_ID`

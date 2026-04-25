@@ -49,14 +49,17 @@ Telegram / Mini App / Tilda
 - `CRM_API_URL`
 - `CRM_API_KEY`
 - `CRM_SYNC_SHARED_SECRET`
-- `CRM_AUTH_SHARED_SECRET`
 - `CRM_OUTBOX_INTERVAL_SEC`
 - `CRM_OUTBOX_BATCH_LIMIT`
 - `CRM_OUTBOX_MAX_ATTEMPTS`
+- `CRM_OUTBOX_EMBEDDED_WORKER=0` если используется отдельный `crm_worker`
 - `DB_PATH` или путь к `/data/luchbar.db`
 - `TG_WEBHOOK_SECRET`
 - `TILDA_SECRET`
 - `DASHBOARD_SECRET`
+- `MINIAPP_URL`
+- `MINIAPP_MIN_LEAD_MINUTES`
+- `TELEGRAM_INIT_DATA_MAX_AGE_SEC`
 - `DASHBOARD_CORS_ORIGINS`
 - `PUBLIC_CORS_ORIGINS`
 - `VK_GROUP_ID`
@@ -64,6 +67,10 @@ Telegram / Mini App / Tilda
 - `VK_CALLBACK_SECRET`
 - `VK_CONFIRMATION_TOKEN`
 - `VK_API_VERSION`
+
+Security-critical переменные (`BOT_TOKEN`, `TG_WEBHOOK_SECRET`, `TILDA_SECRET`, `DASHBOARD_SECRET`, `MINIAPP_URL`, `CRM_SYNC_SHARED_SECRET`) обязательны для запуска. Для локальной диагностики без них можно явно поставить `ALLOW_INSECURE_DEFAULTS=1`, но в production это использовать нельзя.
+
+Старый Telegram auth-flow для CRM удалён. Вход в CRM выполняется по логину и паролю.
 
 ## Локальный запуск
 
@@ -121,7 +128,8 @@ Waiter chat изолирован:
 - Railway service: `BOT_LUCH`
 - DB volume: обычно `/data/luchbar.db`
 - если включён relay, webhook Telegram должен смотреть на relay, а не на этот сервис напрямую
-- VK Callback URL: `https://botluch-production.up.railway.app/vk/callback`
+- VK Callback URL задаётся доменом текущего deploy: `https://<bot-domain>/vk/callback`
+- outbox sync в CRM выполняет process `crm_worker`; embedded worker в web-процессе выключен по умолчанию
 
 ## История изменений
 
