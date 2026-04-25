@@ -103,6 +103,30 @@ def _sync_admin_booking_card(conn, booking_id: int) -> None:
         traceback.print_exc()
 
 
+def _send_booking_event_to_crm(conn, booking_id: int, event_name: str, meta: dict) -> None:
+    try:
+        ok = send_booking_event(conn, booking_id, event_name, meta, dispatch_now=True)
+        if not ok:
+            log_booking_event(
+                conn,
+                booking_id,
+                "CRM_SYNC_FAIL",
+                "system",
+                "system",
+                {"event": event_name, "reason": "send_booking_event_false"},
+            )
+    except Exception as exc:
+        traceback.print_exc()
+        log_booking_event(
+            conn,
+            booking_id,
+            "CRM_SYNC_FAIL",
+            "system",
+            "system",
+            {"event": event_name, "error": str(exc)},
+        )
+
+
 def _start_table_flow_prompt(
     conn,
     *,
@@ -406,19 +430,16 @@ def tg_webhook_impl():
 
                         text, kb = render_booking_card(conn, booking_id)
                         tg_edit_message(chat_id, message_id, text, kb)
-                        try:
-                            send_booking_event(
-                                conn,
-                                booking_id,
-                                "BOOKING_STATUS_CONFIRMED",
-                                {
-                                    "actor_tg_id": actor_id,
-                                    "actor_name": actor_name,
-                                    "payload": {"status": "CONFIRMED"},
-                                },
-                            )
-                        except Exception:
-                            pass
+                        _send_booking_event_to_crm(
+                            conn,
+                            booking_id,
+                            "BOOKING_STATUS_CONFIRMED",
+                            {
+                                "actor_tg_id": actor_id,
+                                "actor_name": actor_name,
+                                "payload": {"status": "CONFIRMED"},
+                            },
+                        )
                         safe_answer_callback(cq_id, "Подтверждено")
                         return {"ok": True}
 
@@ -441,19 +462,16 @@ def tg_webhook_impl():
 
                         text, kb = render_booking_card(conn, booking_id)
                         tg_edit_message(chat_id, message_id, text, kb)
-                        try:
-                            send_booking_event(
-                                conn,
-                                booking_id,
-                                "BOOKING_STATUS_CANCELLED",
-                                {
-                                    "actor_tg_id": actor_id,
-                                    "actor_name": actor_name,
-                                    "payload": {"status": "CANCELLED"},
-                                },
-                            )
-                        except Exception:
-                            pass
+                        _send_booking_event_to_crm(
+                            conn,
+                            booking_id,
+                            "BOOKING_STATUS_CANCELLED",
+                            {
+                                "actor_tg_id": actor_id,
+                                "actor_name": actor_name,
+                                "payload": {"status": "CANCELLED"},
+                            },
+                        )
                         safe_answer_callback(cq_id, "Отменено")
                         return {"ok": True}
 
@@ -488,19 +506,16 @@ def tg_webhook_impl():
                             except Exception:
                                 pass
 
-                        try:
-                            send_booking_event(
-                                conn,
-                                booking_id,
-                                "BOOKING_STATUS_CANCELLED",
-                                {
-                                    "actor_tg_id": actor_id,
-                                    "actor_name": actor_name,
-                                    "payload": {"status": "CANCELLED", "source": "guest"},
-                                },
-                            )
-                        except Exception:
-                            pass
+                        _send_booking_event_to_crm(
+                            conn,
+                            booking_id,
+                            "BOOKING_STATUS_CANCELLED",
+                            {
+                                "actor_tg_id": actor_id,
+                                "actor_name": actor_name,
+                                "payload": {"status": "CANCELLED", "source": "guest"},
+                            },
+                        )
                         safe_answer_callback(cq_id, "Бронь отменена")
                         return {"ok": True}
 
