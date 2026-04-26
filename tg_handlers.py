@@ -127,6 +127,26 @@ def _send_booking_event_to_crm(conn, booking_id: int, event_name: str, meta: dic
         )
 
 
+def _send_table_booking_event_to_crm(
+    conn,
+    booking_id: int,
+    event_name: str,
+    actor_id: str,
+    actor_name: str,
+    payload: dict,
+    *,
+    table_number=None,
+) -> None:
+    meta = {
+        "actor_tg_id": actor_id,
+        "actor_name": actor_name,
+        "payload": payload,
+    }
+    if table_number:
+        meta["table_number"] = table_number
+    _send_booking_event_to_crm(conn, booking_id, event_name, meta)
+
+
 def _start_table_flow_prompt(
     conn,
     *,
@@ -545,24 +565,19 @@ def tg_webhook_impl():
                         try:
                             result = assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name, force_override=True)
                             _sync_admin_booking_card(conn, booking_id)
-                            try:
-                                send_booking_event(
-                                    conn,
-                                    booking_id,
-                                    "BOOKING_TABLE_UPDATED",
-                                    {
-                                        "actor_tg_id": actor_id,
-                                        "actor_name": actor_name,
-                                        "payload": {
-                                            "action": "assign_table",
-                                            "table_number": result["table_number"],
-                                            "force_override": True,
-                                        },
-                                        "table_number": result["table_number"],
-                                    },
-                                )
-                            except Exception:
-                                traceback.print_exc()
+                            _send_table_booking_event_to_crm(
+                                conn,
+                                booking_id,
+                                "BOOKING_TABLE_UPDATED",
+                                actor_id,
+                                actor_name,
+                                {
+                                    "action": "assign_table",
+                                    "table_number": result["table_number"],
+                                    "force_override": True,
+                                },
+                                table_number=result["table_number"],
+                            )
                             try:
                                 notify_waiters_about_deposit_booking(conn, booking_id)
                             except Exception:
@@ -577,17 +592,15 @@ def tg_webhook_impl():
                         try:
                             result = clear_table_assignment(conn, booking_id, actor_id, actor_name)
                             _sync_admin_booking_card(conn, booking_id)
-                            send_booking_event(
+                            _send_table_booking_event_to_crm(
                                 conn,
                                 booking_id,
                                 "BOOKING_TABLE_UPDATED",
+                                actor_id,
+                                actor_name,
                                 {
-                                    "actor_tg_id": actor_id,
-                                    "actor_name": actor_name,
-                                    "payload": {
-                                        "action": "clear_table",
-                                        "old_table_number": result["previous_table_number"],
-                                    },
+                                    "action": "clear_table",
+                                    "old_table_number": result["previous_table_number"],
                                 },
                             )
                             safe_answer_callback(cq_id, "Стол снят")
@@ -896,23 +909,18 @@ def tg_webhook_impl():
                         result = assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name)
                         _complete_table_flow_prompt(conn, int(_table_row["id"]))
                         _sync_admin_booking_card(conn, booking_id)
-                        try:
-                            send_booking_event(
-                                conn,
-                                booking_id,
-                                "BOOKING_TABLE_UPDATED",
-                                {
-                                    "actor_tg_id": actor_id,
-                                    "actor_name": actor_name,
-                                    "payload": {
-                                        "action": "assign_table",
-                                        "table_number": result["table_number"],
-                                    },
-                                    "table_number": result["table_number"],
-                                },
-                            )
-                        except Exception:
-                            pass
+                        _send_table_booking_event_to_crm(
+                            conn,
+                            booking_id,
+                            "BOOKING_TABLE_UPDATED",
+                            actor_id,
+                            actor_name,
+                            {
+                                "action": "assign_table",
+                                "table_number": result["table_number"],
+                            },
+                            table_number=result["table_number"],
+                        )
                         try:
                             notify_waiters_about_deposit_booking(conn, booking_id)
                         except Exception:
@@ -1045,24 +1053,19 @@ def tg_webhook_impl():
                         _complete_table_flow_prompt(conn, int(_table_row["id"]))
                         if booking_id:
                             _sync_admin_booking_card(conn, booking_id)
-                            try:
-                                send_booking_event(
-                                    conn,
-                                    booking_id,
-                                    "BOOKING_TABLE_RESTRICTED",
-                                    {
-                                        "actor_tg_id": actor_id,
-                                        "actor_name": actor_name,
-                                        "payload": {
-                                            "action": "restrict_table",
-                                            "table_number": result["table_number"],
-                                            "restricted_until": result["restricted_until"],
-                                        },
-                                        "table_number": result["table_number"],
-                                    },
-                                )
-                            except Exception:
-                                pass
+                            _send_table_booking_event_to_crm(
+                                conn,
+                                booking_id,
+                                "BOOKING_TABLE_RESTRICTED",
+                                actor_id,
+                                actor_name,
+                                {
+                                    "action": "restrict_table",
+                                    "table_number": result["table_number"],
+                                    "restricted_until": result["restricted_until"],
+                                },
+                                table_number=result["table_number"],
+                            )
                         else:
                             try:
                                 send_table_event(
@@ -1078,6 +1081,7 @@ def tg_webhook_impl():
                                             "restricted_until": result["restricted_until"],
                                         },
                                     },
+                                    dispatch_now=True,
                                 )
                             except Exception:
                                 pass
@@ -1108,6 +1112,7 @@ def tg_webhook_impl():
                                         "table_number": result["table_number"],
                                     },
                                 },
+                                dispatch_now=True,
                             )
                         except Exception:
                             pass

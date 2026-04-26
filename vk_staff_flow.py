@@ -302,7 +302,13 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
     if action == "clear_table":
         clear_table_assignment(conn, booking_id, actor_id, actor_name)
         try:
-            send_booking_event(conn, booking_id, "BOOKING_TABLE_UPDATED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "clear_table", "source": "vk_staff"}})
+            send_booking_event(
+                conn,
+                booking_id,
+                "BOOKING_TABLE_UPDATED",
+                {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "clear_table", "source": "vk_staff"}},
+                dispatch_now=True,
+            )
         except Exception:
             pass
         vk_send_message(peer, _booking_action_message("Стол снят.", f"Бронь #{booking_id}"))
@@ -380,7 +386,18 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
         result = assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name)
         _clear_vk_pending_action(conn, pending_row["id"])
         try:
-            send_booking_event(conn, booking_id, "BOOKING_TABLE_UPDATED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "assign_table", "table_number": result["table_number"], "source": "vk_staff"}})
+            send_booking_event(
+                conn,
+                booking_id,
+                "BOOKING_TABLE_UPDATED",
+                {
+                    "actor_tg_id": actor_id,
+                    "actor_name": actor_name,
+                    "payload": {"action": "assign_table", "table_number": result["table_number"], "source": "vk_staff"},
+                    "table_number": result["table_number"],
+                },
+                dispatch_now=True,
+            )
         except Exception:
             pass
         try:
@@ -457,9 +474,40 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
         _clear_vk_pending_action(conn, pending_row["id"])
         try:
             if booking_id:
-                send_booking_event(conn, booking_id, "BOOKING_TABLE_RESTRICTED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "restrict_table", "table_number": result["table_number"], "restricted_until": result["restricted_until"], "source": "vk_staff"}})
+                send_booking_event(
+                    conn,
+                    booking_id,
+                    "BOOKING_TABLE_RESTRICTED",
+                    {
+                        "actor_tg_id": actor_id,
+                        "actor_name": actor_name,
+                        "payload": {
+                            "action": "restrict_table",
+                            "table_number": result["table_number"],
+                            "restricted_until": result["restricted_until"],
+                            "source": "vk_staff",
+                        },
+                        "table_number": result["table_number"],
+                    },
+                    dispatch_now=True,
+                )
             else:
-                send_table_event(conn, result["table_number"], "TABLE_RESTRICTED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "restrict_table", "table_number": result["table_number"], "restricted_until": result["restricted_until"], "source": "vk_staff"}})
+                send_table_event(
+                    conn,
+                    result["table_number"],
+                    "TABLE_RESTRICTED",
+                    {
+                        "actor_tg_id": actor_id,
+                        "actor_name": actor_name,
+                        "payload": {
+                            "action": "restrict_table",
+                            "table_number": result["table_number"],
+                            "restricted_until": result["restricted_until"],
+                            "source": "vk_staff",
+                        },
+                    },
+                    dispatch_now=True,
+                )
         except Exception:
             pass
         vk_send_message(peer, f"Стол #{result['table_number']} ограничен до {str(result['restricted_until'] or '')[11:16]}.")

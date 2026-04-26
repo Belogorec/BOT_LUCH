@@ -5,6 +5,7 @@ import unittest
 
 import booking_service
 import outbox_dispatcher
+import vk_staff_flow
 from core_schema import run_core_schema_migrations
 from db import init_schema
 from integration_schema import run_integration_schema_migrations
@@ -177,6 +178,58 @@ class VkStaffFlowTests(unittest.TestCase):
         self.assertEqual(len(outbox_rows), 2)
         self.assertTrue(all(row["message_type"] == VK_PROMPT_OUTBOX_TYPE for row in outbox_rows))
         self.assertTrue(all(row["delivery_status"] == "sent" for row in outbox_rows))
+
+    def test_assign_table_pending_text_dispatches_crm_immediately(self):
+        conn = self._connect()
+        calls = []
+        original_dispatch_vk = outbox_dispatcher._dispatch_vk
+        original_send_booking_event = vk_staff_flow.send_booking_event
+        original_notify_waiters = vk_staff_flow.notify_waiters_about_deposit_booking
+        original_vk_send_message = vk_staff_flow.vk_send_message
+
+        def _fake_send(conn_arg, booking_id, event_name, meta, *, dispatch_now=False):
+            calls.append(
+                {
+                    "booking_id": booking_id,
+                    "event_name": event_name,
+                    "meta": meta,
+                    "dispatch_now": dispatch_now,
+                }
+            )
+            return True
+
+        outbox_dispatcher._dispatch_vk = lambda target, payload, bot_scope: "vk-prompt"
+        vk_staff_flow.send_booking_event = _fake_send
+        vk_staff_flow.notify_waiters_about_deposit_booking = lambda *args, **kwargs: None
+        vk_staff_flow.vk_send_message = lambda *args, **kwargs: "vk-direct"
+        try:
+            self._seed_booking(conn, booking_id=3, phone="+79000000103")
+            process_vk_booking_payload(
+                conn,
+                peer_id=2000000003,
+                from_id=999,
+                payload={"kind": "booking_action", "action": "prompt_assign_table", "booking_id": 3},
+            )
+            handled = process_vk_pending_text(
+                conn,
+                peer_id=2000000003,
+                from_id=999,
+                text="221",
+            )
+            conn.commit()
+        finally:
+            outbox_dispatcher._dispatch_vk = original_dispatch_vk
+            vk_staff_flow.send_booking_event = original_send_booking_event
+            vk_staff_flow.notify_waiters_about_deposit_booking = original_notify_waiters
+            vk_staff_flow.vk_send_message = original_vk_send_message
+            conn.close()
+
+        self.assertTrue(handled)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["booking_id"], 3)
+        self.assertEqual(calls[0]["event_name"], "BOOKING_TABLE_UPDATED")
+        self.assertEqual(calls[0]["meta"]["table_number"], "221")
+        self.assertTrue(calls[0]["dispatch_now"])
 
 
 if __name__ == "__main__":

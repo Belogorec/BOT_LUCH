@@ -49,6 +49,45 @@ class TelegramCrmStatusSyncTests(unittest.TestCase):
         self.assertEqual(calls[0]["event_name"], "BOOKING_STATUS_CONFIRMED")
         self.assertTrue(calls[0]["dispatch_now"])
 
+    def test_table_event_dispatches_to_crm_immediately_with_table_number(self):
+        calls = []
+        original_send_booking_event = tg_handlers.send_booking_event
+        original_log_booking_event = tg_handlers.log_booking_event
+
+        def _fake_send(conn, booking_id, event_name, meta, *, dispatch_now=False):
+            calls.append(
+                {
+                    "booking_id": booking_id,
+                    "event_name": event_name,
+                    "meta": meta,
+                    "dispatch_now": dispatch_now,
+                }
+            )
+            return True
+
+        tg_handlers.send_booking_event = _fake_send
+        tg_handlers.log_booking_event = lambda *args, **kwargs: None
+        try:
+            tg_handlers._send_table_booking_event_to_crm(
+                object(),
+                42,
+                "BOOKING_TABLE_UPDATED",
+                "admin-1",
+                "Admin",
+                {"action": "assign_table", "table_number": "221"},
+                table_number="221",
+            )
+        finally:
+            tg_handlers.send_booking_event = original_send_booking_event
+            tg_handlers.log_booking_event = original_log_booking_event
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["booking_id"], 42)
+        self.assertEqual(calls[0]["event_name"], "BOOKING_TABLE_UPDATED")
+        self.assertEqual(calls[0]["meta"]["table_number"], "221")
+        self.assertEqual(calls[0]["meta"]["payload"]["action"], "assign_table")
+        self.assertTrue(calls[0]["dispatch_now"])
+
 
 if __name__ == "__main__":
     unittest.main()
