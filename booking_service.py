@@ -12,7 +12,13 @@ from core_sync import (
 )
 from core_write_guards import delete_table_block, release_assignment, update_reservation
 from db import get_tags, set_tags
-from config import BUSINESS_TZ_OFFSET_HOURS, CORE_ONLY_MODE, LEGACY_MIRROR_ENABLED
+from config import (
+    BUSINESS_TZ_OFFSET_HOURS,
+    CORE_ONLY_MODE,
+    LEGACY_MIRROR_ENABLED,
+    TABLE_RESERVATION_BUFFER_MINUTES,
+    TABLE_RESERVATION_DURATION_MINUTES,
+)
 from domain import AssignTable, ClearDeposit, ClearTable, CreateReservation, DomainValidationError, SetDeposit
 
 TABLE_LABELS = {"NONE", "DEPOSIT", "RESTRICTED"}
@@ -216,6 +222,10 @@ def _booking_reservation_dt(booking_row) -> str:
     if rd and rt:
         return f"{rd}T{rt}"
     return ""
+
+
+def _table_occupancy_minutes() -> int:
+    return max(1, int(TABLE_RESERVATION_DURATION_MINUTES or 0) + max(0, int(TABLE_RESERVATION_BUFFER_MINUTES or 0)))
 
 
 def _legacy_status_to_core(status: str) -> str:
@@ -970,6 +980,7 @@ def get_table_booking_conflicts(conn, table_number: str, reservation_dt: str, ex
     if not reservation_dt:
         return []
     normalized_dt = str(reservation_dt or "").strip().replace("T", " ")
+    occupancy_modifier = f"+{_table_occupancy_minutes()} minutes"
     exclude_reservation_id = resolve_core_reservation_id(conn, int(exclude_booking_id or 0), allow_booking_sync=False)
     rows = conn.execute(
         """
@@ -986,7 +997,8 @@ def get_table_booking_conflicts(conn, table_number: str, reservation_dt: str, ex
         JOIN tables_core tc
           ON tc.id = rt.table_id
         WHERE tc.code = ?
-          AND replace(r.reservation_at, 'T', ' ') = ?
+          AND datetime(replace(r.reservation_at, 'T', ' ')) < datetime(?, ?)
+          AND datetime(?) < datetime(replace(r.reservation_at, 'T', ' '), ?)
           AND COALESCE(lower(trim(r.status)), 'pending') NOT IN ('declined', 'cancelled', 'no_show', 'completed')
           AND (? IS NULL OR r.id != ?)
         ORDER BY r.id ASC
@@ -994,6 +1006,9 @@ def get_table_booking_conflicts(conn, table_number: str, reservation_dt: str, ex
         (
             str(table_number or "").strip(),
             normalized_dt,
+            occupancy_modifier,
+            normalized_dt,
+            occupancy_modifier,
             int(exclude_reservation_id) if exclude_reservation_id else None,
             int(exclude_reservation_id) if exclude_reservation_id else None,
         ),
