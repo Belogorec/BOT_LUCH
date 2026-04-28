@@ -8,6 +8,93 @@ def _h(s: str) -> str:
     return html.escape(s or "", quote=False)
 
 
+def _booking_card_keyboard(booking_id: int) -> dict:
+    def btn(text_, data_):
+        return {"text": text_, "callback_data": data_}
+
+    return {
+        "inline_keyboard": [
+            [
+                btn("✅ Подтвердить бронь", f"b:{booking_id}:booking:confirm"),
+                btn("❌ Отменить бронь", f"b:{booking_id}:booking:cancel"),
+            ],
+            [
+                btn("🪑 Назначить стол", f"b:{booking_id}:table:assign"),
+                btn("🧹 Снять стол", f"b:{booking_id}:table:clear"),
+            ],
+            [
+                btn("⛔ Ограничить стол", f"b:{booking_id}:table:restrict"),
+                btn("📋 Ограничения", f"b:{booking_id}:table:show_restrictions"),
+            ],
+            [
+                btn("💰 Депозит", f"b:{booking_id}:deposit:set"),
+                btn("📋 История визитов", f"b:{booking_id}:visits"),
+            ],
+            [
+                btn("✍️ Комментарий к гостю", f"b:{booking_id}:note"),
+            ],
+        ]
+    }
+
+
+def render_booking_card_from_reservation(reservation: dict) -> tuple[str, dict]:
+    booking_id = int(reservation.get("booking_id") or reservation.get("reservation_id") or 0)
+    if booking_id <= 0:
+        return ("Бронь не найдена.", {"inline_keyboard": []})
+    reservation_id = int(reservation.get("reservation_id") or booking_id)
+    status = str(reservation.get("status") or "pending").upper()
+    reservation_date = str(reservation.get("reservation_date") or "").strip()
+    reservation_time = str(reservation.get("reservation_time") or "").strip()
+    if not (reservation_date or reservation_time):
+        reservation_at = str(reservation.get("reservation_at") or "").replace("T", " ")
+        reservation_date = reservation_at[:10] if len(reservation_at) >= 10 else ""
+        reservation_time = reservation_at[11:16] if len(reservation_at) >= 16 else ""
+    dt_str = f"{reservation_date} {reservation_time}".strip()
+    guest_name = str(reservation.get("guest_name") or "—")
+    guest_phone = str(reservation.get("guest_phone") or "").strip()
+    phone_line_value = (
+        f"<a href=\"tel:{_h(guest_phone)}\">{_h(guest_phone)}</a>" if guest_phone else "—"
+    )
+    table_number = str(reservation.get("table_number") or "").strip()
+    deposit_amount = reservation.get("deposit_amount")
+    deposit_comment = str(reservation.get("deposit_comment") or "").strip()
+    if deposit_amount:
+        deposit_text = f"{int(deposit_amount)}" if str(deposit_amount).isdigit() else _h(str(deposit_amount))
+        if deposit_comment:
+            deposit_text += f" ({_h(deposit_comment)})"
+    else:
+        deposit_text = "—"
+    comment = str(reservation.get("comment") or "").strip()
+    restricted_until = str(reservation.get("restricted_until") or "").strip()
+    restriction_line = ""
+    if restricted_until:
+        restriction_time = restricted_until[11:16] if len(restricted_until) >= 16 else restricted_until
+        restriction_line = f"<b>Ограничение:</b> до <code>{_h(restriction_time)}</code>"
+    text_parts = [
+        "<b>LUCHBAR</b>",
+        f"<b>Бронь #{booking_id}</b>",
+        f"<b>CRM ID:</b> {_h(str(reservation_id))}",
+        f"<b>Статус:</b> {_h(status)}",
+        f"<b>Дата/время:</b> {_h(dt_str) if dt_str else '—'}",
+        f"<b>Гостей:</b> {_h(str(reservation.get('party_size') or '—'))}",
+        "",
+        f"<b>Имя:</b> {_h(guest_name)}",
+        f"<b>Телефон:</b> {phone_line_value}",
+        "",
+        f"<b>Стол:</b> {_h(table_number) if table_number else '—'}",
+        f"<b>Депозит:</b> {deposit_text}",
+    ]
+    if restriction_line:
+        text_parts.append(restriction_line)
+    text_parts.extend([
+        "",
+        f"<b>Комментарий к брони:</b> {_h(comment) if comment else '—'}",
+        "",
+        f"<i>Обновлено из CRM: {_h(datetime.now().strftime('%H:%M:%S'))}</i>",
+    ])
+    return "\n".join(text_parts), _booking_card_keyboard(booking_id)
+
+
 def render_booking_card(conn, booking_id: int) -> tuple[str, dict]:
     """
     Рендерит компактную карточку брони для админов.
@@ -99,32 +186,7 @@ def render_booking_card(conn, booking_id: int) -> tuple[str, dict]:
     text_parts.extend(["", f"<i>Обновлено: {_h(datetime.now().strftime('%H:%M:%S'))}</i>"])
     text = "\n".join([p for p in text_parts if p is not None])
 
-    def btn(text_, data_):
-        return {"text": text_, "callback_data": data_}
-
-    kb = {
-        "inline_keyboard": [
-            [
-                btn("✅ Подтвердить бронь", f"b:{booking_id}:booking:confirm"),
-                btn("❌ Отменить бронь", f"b:{booking_id}:booking:cancel"),
-            ],
-            [
-                btn("🪑 Назначить стол", f"b:{booking_id}:table:assign"),
-                btn("🧹 Снять стол", f"b:{booking_id}:table:clear"),
-            ],
-            [
-                btn("⛔ Ограничить стол", f"b:{booking_id}:table:restrict"),
-                btn("📋 Ограничения", f"b:{booking_id}:table:show_restrictions"),
-            ],
-            [
-                btn("💰 Депозит", f"b:{booking_id}:deposit:set"),
-                btn("📋 История визитов", f"b:{booking_id}:visits"),
-            ],
-            [
-                btn("✍️ Комментарий к гостю", f"b:{booking_id}:note"),
-            ],
-        ]
-    }
+    kb = _booking_card_keyboard(booking_id)
 
     return text, kb
 

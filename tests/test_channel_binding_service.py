@@ -15,7 +15,9 @@ class ChannelBindingServiceTests(unittest.TestCase):
         self.tmp = tempfile.NamedTemporaryFile(delete=False)
         self.tmp.close()
         self.prev_guest_comm_enabled = channel_binding_service.GUEST_COMM_ENABLED
+        self.prev_crm_authoritative = channel_binding_service.CRM_AUTHORITATIVE
         channel_binding_service.GUEST_COMM_ENABLED = True
+        channel_binding_service.CRM_AUTHORITATIVE = False
 
         conn = sqlite3.connect(self.tmp.name)
         conn.row_factory = sqlite3.Row
@@ -29,6 +31,7 @@ class ChannelBindingServiceTests(unittest.TestCase):
 
     def tearDown(self):
         channel_binding_service.GUEST_COMM_ENABLED = self.prev_guest_comm_enabled
+        channel_binding_service.CRM_AUTHORITATIVE = self.prev_crm_authoritative
         try:
             os.unlink(self.tmp.name)
         except FileNotFoundError:
@@ -91,6 +94,32 @@ class ChannelBindingServiceTests(unittest.TestCase):
         self.assertEqual(canonical["channel_type"], "telegram")
         self.assertEqual(canonical["status"], "active")
         self.assertEqual(int(legacy["c"] or 0), 0)
+
+    def test_authoritative_mode_rejects_guest_binding_token_runtime(self):
+        conn = self._connect()
+        channel_binding_service.CRM_AUTHORITATIVE = True
+        try:
+            self._seed_booking_pair(conn, booking_id=10)
+            with self.assertRaises(ValueError) as ctx:
+                channel_binding_service.create_binding_token(
+                    conn,
+                    reservation_id=10,
+                    guest_phone_e164="+79000000011",
+                    channel_type="telegram",
+                )
+            result = channel_binding_service.consume_binding_token_once(
+                conn,
+                token_plain="token",
+                channel_type="telegram",
+                external_user_id="tg-user",
+            )
+            token_count = int(conn.execute("SELECT COUNT(*) AS c FROM channel_binding_tokens").fetchone()["c"])
+        finally:
+            conn.close()
+
+        self.assertEqual(str(ctx.exception), "guest_comm_disabled_in_authoritative_mode")
+        self.assertEqual(result["error"], "guest_comm_disabled_in_authoritative_mode")
+        self.assertEqual(token_count, 0)
 
     def test_consume_canonical_binding_token_creates_contact_channel_without_legacy_binding_row(self):
         conn = self._connect()

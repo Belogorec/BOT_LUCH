@@ -21,8 +21,10 @@ class VkStaffFlowTests(unittest.TestCase):
     def setUp(self):
         self.prev_core_only = booking_service.CORE_ONLY_MODE
         self.prev_legacy_mirror = booking_service.LEGACY_MIRROR_ENABLED
+        self.prev_vk_authoritative = vk_staff_flow.CRM_AUTHORITATIVE
         booking_service.CORE_ONLY_MODE = False
         booking_service.LEGACY_MIRROR_ENABLED = True
+        vk_staff_flow.CRM_AUTHORITATIVE = False
         self.tmp = tempfile.NamedTemporaryFile(delete=False)
         self.tmp.close()
         conn = sqlite3.connect(self.tmp.name)
@@ -38,6 +40,7 @@ class VkStaffFlowTests(unittest.TestCase):
     def tearDown(self):
         booking_service.CORE_ONLY_MODE = self.prev_core_only
         booking_service.LEGACY_MIRROR_ENABLED = self.prev_legacy_mirror
+        vk_staff_flow.CRM_AUTHORITATIVE = self.prev_vk_authoritative
         try:
             os.unlink(self.tmp.name)
         except FileNotFoundError:
@@ -59,6 +62,18 @@ class VkStaffFlowTests(unittest.TestCase):
             """,
             (booking_id, phone),
         )
+
+    def _seed_core_reservation(self, conn, *, booking_id: int, status: str = "pending") -> int:
+        conn.execute(
+            """
+            INSERT INTO reservations (
+                source, external_ref, guest_name, guest_phone, reservation_at, party_size, status
+            )
+            VALUES ('legacy_booking', ?, 'Анна', '+79000000101', '2026-05-01T19:00', 2, ?)
+            """,
+            (str(booking_id), status),
+        )
+        return int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
 
     def test_prompt_assign_table_uses_canonical_pending_event_and_outbox(self):
         conn = self._connect()
@@ -230,6 +245,185 @@ class VkStaffFlowTests(unittest.TestCase):
         self.assertEqual(calls[0]["event_name"], "BOOKING_TABLE_UPDATED")
         self.assertEqual(calls[0]["meta"]["table_number"], "221")
         self.assertTrue(calls[0]["dispatch_now"])
+
+    def test_authoritative_confirm_uses_crm_command_without_local_status_mutation(self):
+        conn = self._connect()
+        sent_messages = []
+        crm_calls = []
+        original_vk_send_message = vk_staff_flow.vk_send_message
+        original_reservation_status = vk_staff_flow.crm_commands.reservation_status
+        vk_staff_flow.CRM_AUTHORITATIVE = True
+        vk_staff_flow.vk_send_message = lambda peer, text, **kwargs: sent_messages.append((peer, text)) or "vk-direct"
+
+        def _fake_status(reservation_id, *, status, event_id, actor):
+            crm_calls.append({"reservation_id": reservation_id, "status": status, "event_id": event_id, "actor": actor})
+            return {"accepted": True, "ok": True}
+
+        vk_staff_flow.crm_commands.reservation_status = _fake_status
+        try:
+            self._seed_booking(conn, booking_id=4)
+            reservation_id = self._seed_core_reservation(conn, booking_id=4)
+            handled = process_vk_booking_payload(
+                conn,
+                peer_id=2000000004,
+                from_id=1001,
+                payload={"kind": "booking_action", "action": "confirm", "booking_id": 4},
+            )
+            booking = conn.execute("SELECT status FROM bookings WHERE id = 4").fetchone()
+        finally:
+            vk_staff_flow.vk_send_message = original_vk_send_message
+            vk_staff_flow.crm_commands.reservation_status = original_reservation_status
+            conn.close()
+
+        self.assertTrue(handled)
+        self.assertEqual(booking["status"], "WAITING")
+        self.assertEqual(len(crm_calls), 1)
+        self.assertEqual(crm_calls[0]["reservation_id"], reservation_id)
+        self.assertEqual(crm_calls[0]["status"], "confirmed")
+        self.assertTrue(sent_messages)
+
+    def test_authoritative_confirm_without_local_booking_uses_payload_id_as_reservation_id(self):
+        conn = self._connect()
+        sent_messages = []
+        crm_calls = []
+        original_vk_send_message = vk_staff_flow.vk_send_message
+        original_reservation_status = vk_staff_flow.crm_commands.reservation_status
+        vk_staff_flow.CRM_AUTHORITATIVE = True
+        vk_staff_flow.vk_send_message = lambda peer, text, **kwargs: sent_messages.append((peer, text)) or "vk-direct"
+
+        def _fake_status(reservation_id, *, status, event_id, actor):
+            crm_calls.append({"reservation_id": reservation_id, "status": status, "event_id": event_id, "actor": actor})
+            return {"accepted": True, "ok": True, "reservation": {"reservation_id": reservation_id, "booking_id": reservation_id}}
+
+        vk_staff_flow.crm_commands.reservation_status = _fake_status
+        try:
+            handled = process_vk_booking_payload(
+                conn,
+                peer_id=2000000099,
+                from_id=1001,
+                payload={"kind": "booking_action", "action": "confirm", "booking_id": 99},
+            )
+            local_count = int(conn.execute("SELECT COUNT(*) AS c FROM bookings").fetchone()["c"])
+        finally:
+            vk_staff_flow.vk_send_message = original_vk_send_message
+            vk_staff_flow.crm_commands.reservation_status = original_reservation_status
+            conn.close()
+
+        self.assertTrue(handled)
+        self.assertEqual(local_count, 0)
+        self.assertEqual(len(crm_calls), 1)
+        self.assertEqual(crm_calls[0]["reservation_id"], 99)
+        self.assertEqual(crm_calls[0]["status"], "confirmed")
+        self.assertTrue(sent_messages)
+
+    def test_authoritative_assign_rejection_keeps_local_assignment_empty(self):
+        conn = self._connect()
+        sent_messages = []
+        original_dispatch_vk = outbox_dispatcher._dispatch_vk
+        original_vk_send_message = vk_staff_flow.vk_send_message
+        original_assign_table = vk_staff_flow.crm_commands.assign_table
+        outbox_dispatcher._dispatch_vk = lambda target, payload, bot_scope: "vk-prompt"
+        vk_staff_flow.vk_send_message = lambda peer, text, **kwargs: sent_messages.append((peer, text)) or "vk-direct"
+        vk_staff_flow.CRM_AUTHORITATIVE = True
+        vk_staff_flow.crm_commands.assign_table = lambda *args, **kwargs: {
+            "accepted": False,
+            "ok": False,
+            "error": "table_time_conflict",
+        }
+        try:
+            self._seed_booking(conn, booking_id=5)
+            self._seed_core_reservation(conn, booking_id=5, status="confirmed")
+            process_vk_booking_payload(
+                conn,
+                peer_id=2000000005,
+                from_id=1002,
+                payload={"kind": "booking_action", "action": "prompt_assign_table", "booking_id": 5},
+            )
+            handled = process_vk_pending_text(
+                conn,
+                peer_id=2000000005,
+                from_id=1002,
+                text="221",
+            )
+            booking = conn.execute("SELECT assigned_table_number FROM bookings WHERE id = 5").fetchone()
+            pending = conn.execute(
+                "SELECT processing_status FROM bot_inbound_events WHERE event_type = ? ORDER BY id DESC LIMIT 1",
+                (VK_PENDING_EVENT_TYPE,),
+            ).fetchone()
+        finally:
+            outbox_dispatcher._dispatch_vk = original_dispatch_vk
+            vk_staff_flow.vk_send_message = original_vk_send_message
+            vk_staff_flow.crm_commands.assign_table = original_assign_table
+            conn.close()
+
+        self.assertTrue(handled)
+        self.assertIsNone(booking["assigned_table_number"])
+        self.assertEqual(pending["processing_status"], "pending")
+        self.assertTrue(any("стол занят" in text.lower() for _peer, text in sent_messages))
+
+    def test_authoritative_assign_without_local_booking_calls_crm(self):
+        conn = self._connect()
+        sent_messages = []
+        crm_calls = []
+        original_dispatch_vk = outbox_dispatcher._dispatch_vk
+        original_vk_send_message = vk_staff_flow.vk_send_message
+        original_assign_table = vk_staff_flow.crm_commands.assign_table
+        outbox_dispatcher._dispatch_vk = lambda target, payload, bot_scope: "vk-prompt"
+        vk_staff_flow.vk_send_message = lambda peer, text, **kwargs: sent_messages.append((peer, text)) or "vk-direct"
+        vk_staff_flow.CRM_AUTHORITATIVE = True
+
+        def _fake_assign(reservation_id, *, table_number, guests_count, guest_name="", guest_phone="", event_id, actor):
+            crm_calls.append(
+                {
+                    "reservation_id": reservation_id,
+                    "table_number": table_number,
+                    "guests_count": guests_count,
+                    "guest_name": guest_name,
+                    "guest_phone": guest_phone,
+                }
+            )
+            return {
+                "accepted": True,
+                "ok": True,
+                "reservation": {
+                    "reservation_id": reservation_id,
+                    "booking_id": reservation_id,
+                    "table_number": table_number,
+                },
+            }
+
+        vk_staff_flow.crm_commands.assign_table = _fake_assign
+        try:
+            process_vk_booking_payload(
+                conn,
+                peer_id=2000000100,
+                from_id=1002,
+                payload={"kind": "booking_action", "action": "prompt_assign_table", "booking_id": 100},
+            )
+            handled = process_vk_pending_text(
+                conn,
+                peer_id=2000000100,
+                from_id=1002,
+                text="221",
+            )
+            local_count = int(conn.execute("SELECT COUNT(*) AS c FROM bookings").fetchone()["c"])
+            pending = conn.execute(
+                "SELECT processing_status FROM bot_inbound_events WHERE event_type = ? ORDER BY id DESC LIMIT 1",
+                (VK_PENDING_EVENT_TYPE,),
+            ).fetchone()
+        finally:
+            outbox_dispatcher._dispatch_vk = original_dispatch_vk
+            vk_staff_flow.vk_send_message = original_vk_send_message
+            vk_staff_flow.crm_commands.assign_table = original_assign_table
+            conn.close()
+
+        self.assertTrue(handled)
+        self.assertEqual(local_count, 0)
+        self.assertEqual(pending["processing_status"], "processed")
+        self.assertEqual(crm_calls[0]["reservation_id"], 100)
+        self.assertEqual(crm_calls[0]["table_number"], "221")
+        self.assertEqual(crm_calls[0]["guests_count"], 0)
+        self.assertTrue(any("назначен" in text.lower() for _peer, text in sent_messages))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 import json
 from typing import Any, Optional
 
-from config import GUEST_COMM_ENABLED, GUEST_NOTIFICATION_TEST_MODE
+from config import CRM_AUTHORITATIVE, GUEST_COMM_ENABLED, GUEST_NOTIFICATION_TEST_MODE
 from booking_service import resolve_core_reservation_id
 from integration_service import create_outbox_message
 from local_log import log_event, log_exception
@@ -81,6 +81,8 @@ def _load_active_contact_channels(conn, guest_phone_e164: str):
 
 
 def resolve_preferred_channel(conn, *, reservation_id: Optional[int] = None, guest_phone_e164: str = "") -> dict[str, Any]:
+    if CRM_AUTHORITATIVE:
+        return {"ok": False, "error": "guest_comm_disabled_in_authoritative_mode"}
     if not GUEST_COMM_ENABLED:
         return {"ok": False, "error": "guest_comm_disabled"}
 
@@ -138,6 +140,8 @@ def send_service_notification(
     guest_phone_e164: str = "",
     force_channel: str = "",
 ) -> dict[str, Any]:
+    if CRM_AUTHORITATIVE:
+        return {"ok": False, "error": "guest_comm_disabled_in_authoritative_mode"}
     if not GUEST_COMM_ENABLED:
         return {"ok": False, "error": "guest_comm_disabled"}
 

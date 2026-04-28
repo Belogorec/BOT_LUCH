@@ -14,12 +14,14 @@ from core_write_guards import delete_table_block, release_assignment, update_res
 from db import get_tags, set_tags
 from config import (
     BUSINESS_TZ_OFFSET_HOURS,
+    CRM_AUTHORITATIVE,
     CORE_ONLY_MODE,
     LEGACY_MIRROR_ENABLED,
     TABLE_RESERVATION_BUFFER_MINUTES,
     TABLE_RESERVATION_DURATION_MINUTES,
 )
 from domain import AssignTable, ClearDeposit, ClearTable, CreateReservation, DomainValidationError, SetDeposit
+from local_log import log_event
 
 TABLE_LABELS = {"NONE", "DEPOSIT", "RESTRICTED"}
 INACTIVE_BOOKING_STATUSES = {"DECLINED", "CANCELLED", "NO_SHOW"}
@@ -306,6 +308,18 @@ def _legacy_mirror_enabled() -> bool:
 
 def _runtime_core_only_enabled() -> bool:
     return bool(CORE_ONLY_MODE) or not bool(LEGACY_MIRROR_ENABLED)
+
+
+def _log_authoritative_local_domain_call(action: str, booking_id: int = 0, table_number: str = "") -> None:
+    if not CRM_AUTHORITATIVE:
+        return
+    log_event(
+        "CRM-AUTHORITATIVE-GUARD",
+        status="local_domain_call",
+        action=action,
+        booking_id=int(booking_id or 0),
+        table_number=str(table_number or "-"),
+    )
 
 
 def _table_exists(conn, table_name: str) -> bool:
@@ -1074,6 +1088,7 @@ def assign_table_to_booking(
     actor_name: str,
     force_override: bool = False,
 ):
+    _log_authoritative_local_domain_call("assign_table_to_booking", booking_id, table_number)
     _validate_booking_action_command(
         action="assign_table",
         booking_id=booking_id,
@@ -1182,6 +1197,7 @@ def assign_table_to_booking(
 
 
 def clear_table_assignment(conn, booking_id: int, actor_id: str, actor_name: str):
+    _log_authoritative_local_domain_call("clear_table_assignment", booking_id)
     _validate_booking_action_command(
         action="clear_table",
         booking_id=booking_id,
@@ -1223,6 +1239,7 @@ def set_booking_deposit(
     actor_name: str,
     comment: str = "",
 ):
+    _log_authoritative_local_domain_call("set_booking_deposit", booking_id)
     _validate_booking_action_command(
         action="set_deposit",
         booking_id=booking_id,
@@ -1285,6 +1302,7 @@ def clear_booking_deposit(
     actor_id: str,
     actor_name: str,
 ):
+    _log_authoritative_local_domain_call("clear_booking_deposit", booking_id)
     _validate_booking_action_command(
         action="clear_deposit",
         booking_id=booking_id,
@@ -1372,6 +1390,7 @@ def set_table_label(
     booking_id: Optional[int] = None,
     force_override: bool = False,
 ):
+    _log_authoritative_local_domain_call("set_table_label", int(booking_id or 0), table_number)
     normalized_table = normalize_table_number(table_number)
     if not normalized_table:
         raise ValueError("invalid_table_number")
@@ -1558,6 +1577,7 @@ def ensure_visit_from_confirmed_booking(conn, booking_id: int, actor_id: str, ac
 
 
 def mark_booking_cancelled(conn, booking_id: int, actor_id: str, actor_name: str):
+    _log_authoritative_local_domain_call("mark_booking_cancelled", booking_id)
     b = load_booking_read_model(conn, booking_id)
     reservation_id = _ensure_core_reservation_id_for_booking(conn, booking_id)
     update_reservation(
@@ -1584,6 +1604,7 @@ def mark_booking_cancelled(conn, booking_id: int, actor_id: str, actor_name: str
 
 
 def set_booking_status(conn, booking_id: int, status: str, actor_id: str, actor_name: str, source: str = "") -> str:
+    _log_authoritative_local_domain_call("set_booking_status", booking_id)
     normalized = str(status or "").strip().upper()
     if not normalized:
         raise ValueError("invalid_status")

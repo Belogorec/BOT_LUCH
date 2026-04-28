@@ -6,9 +6,11 @@ from datetime import datetime, timedelta
 
 from flask import request, abort
 
+import crm_commands
 from application import execute_telegram_miniapp_booking
 from core_sync import sync_booking_to_core
 from config import (
+    CRM_AUTHORITATIVE,
     TG_WEBHOOK_SECRET,
     PROMO_ADMIN_IDS,
     TG_CHAT_ID,
@@ -44,6 +46,7 @@ from booking_service import (
 )
 from booking_render import (
     render_booking_card,
+    render_booking_card_from_reservation,
     render_guest_visits_message,
 )
 from crm_sync import send_booking_event, send_table_event
@@ -84,15 +87,21 @@ def _is_waiter_chat(chat_id: str) -> bool:
     return bool(WAITER_CHAT_ID) and str(chat_id or "").strip() == str(WAITER_CHAT_ID).strip()
 
 
-def _sync_admin_booking_card(conn, booking_id: int) -> None:
+def _sync_admin_booking_card(conn, booking_id: int, command_result=None) -> None:
     try:
-        reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
+        reservation_snapshot = command_result.get("reservation") if isinstance(command_result, dict) else {}
+        reservation_id = int(reservation_snapshot.get("reservation_id") or 0) if isinstance(reservation_snapshot, dict) else 0
+        if not reservation_id:
+            reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
         if not reservation_id:
             return
         link = get_hostess_card_link(conn, reservation_id=int(reservation_id))
         if not link or not link["chat_id"] or not link["message_id"]:
             return
-        text_card, kb_card = render_booking_card(conn, booking_id)
+        if isinstance(reservation_snapshot, dict) and reservation_snapshot:
+            text_card, kb_card = render_booking_card_from_reservation(reservation_snapshot)
+        else:
+            text_card, kb_card = render_booking_card(conn, booking_id)
         tg_edit_message(
             link["chat_id"],
             link["message_id"],
@@ -101,6 +110,31 @@ def _sync_admin_booking_card(conn, booking_id: int) -> None:
         )
     except Exception:
         traceback.print_exc()
+
+
+def _edit_callback_booking_card(chat_id: str, message_id: str, command_result: dict) -> None:
+    reservation_snapshot = command_result.get("reservation") if isinstance(command_result, dict) else {}
+    if not isinstance(reservation_snapshot, dict) or not reservation_snapshot:
+        return
+    text_card, kb_card = render_booking_card_from_reservation(reservation_snapshot)
+    tg_edit_message(chat_id, message_id, text_card, kb_card)
+
+
+def _command_snapshot_has_table(command_result: dict) -> bool:
+    reservation_snapshot = command_result.get("reservation") if isinstance(command_result, dict) else {}
+    if not isinstance(reservation_snapshot, dict):
+        return False
+    return bool(normalize_table_number(reservation_snapshot.get("table_number")))
+
+
+def _maybe_local_guest_fields(row) -> dict[str, object]:
+    if not row:
+        return {"guests_count": 0, "guest_name": "", "guest_phone": ""}
+    return {
+        "guests_count": int(row["guests_count"] or 0),
+        "guest_name": str(row["name"] or ""),
+        "guest_phone": str(row["phone_e164"] or row["phone_raw"] or ""),
+    }
 
 
 def _send_booking_event_to_crm(conn, booking_id: int, event_name: str, meta: dict) -> None:
@@ -145,6 +179,30 @@ def _send_table_booking_event_to_crm(
     if table_number:
         meta["table_number"] = table_number
     _send_booking_event_to_crm(conn, booking_id, event_name, meta)
+
+
+def _tg_crm_actor(actor_id: str, actor_name: str) -> dict[str, str]:
+    return {"id": str(actor_id or "").strip() or "telegram", "name": str(actor_name or "").strip() or str(actor_id or "telegram")}
+
+
+def _tg_crm_reservation_id(conn, booking_id: int) -> int:
+    reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
+    return int(reservation_id or booking_id or 0)
+
+
+def _tg_crm_event_id(*parts: object) -> str:
+    return ":".join(str(part or "").strip() for part in parts if str(part or "").strip())
+
+
+def _tg_crm_rejection_text(result: dict) -> str:
+    error = str(result.get("error") or "crm_command_failed")
+    mapping = {
+        "table_time_conflict": "CRM отклонила действие: стол занят на это время.",
+        "table_conflict": "CRM отклонила действие: конфликт по столу.",
+        "booking_not_found": "CRM не нашла бронь.",
+        "confirmed_booking_required": "CRM отклонила действие: бронь должна быть подтверждена.",
+    }
+    return mapping.get(error, f"CRM отклонила действие: {error}")
 
 
 def _start_table_flow_prompt(
@@ -391,11 +449,11 @@ def tg_webhook_impl():
                 booking_id = int(parts[1])
 
                 b = load_booking_read_model(conn, booking_id)
-                if not b:
+                if not b and not CRM_AUTHORITATIVE:
                     safe_answer_callback(cq_id, "Бронь не найдена")
                     return {"ok": True}
 
-                phone = b["phone_e164"] or ""
+                phone = (b["phone_e164"] or "") if b else ""
                 if phone:
                     upsert_guest_if_missing(conn, phone, "")
 
@@ -413,6 +471,20 @@ def tg_webhook_impl():
                     action = parts[3].strip().lower()
 
                     if action == "confirm":
+                        if CRM_AUTHORITATIVE:
+                            result = crm_commands.reservation_status(
+                                _tg_crm_reservation_id(conn, booking_id),
+                                status="confirmed",
+                                event_id=_tg_crm_event_id("telegram", cq_id, booking_id, "confirm"),
+                                actor=_tg_crm_actor(actor_id, actor_name),
+                            )
+                            if result.get("accepted"):
+                                _edit_callback_booking_card(chat_id, message_id, result)
+                                _sync_admin_booking_card(conn, booking_id, result)
+                                safe_answer_callback(cq_id, "Подтверждено")
+                            else:
+                                safe_answer_callback(cq_id, _tg_crm_rejection_text(result))
+                            return {"ok": True}
                         core_reservation_id = sync_booking_to_core(conn, booking_id)
                         record_inbound_event(
                             conn,
@@ -464,6 +536,20 @@ def tg_webhook_impl():
                         return {"ok": True}
 
                     if action == "cancel":
+                        if CRM_AUTHORITATIVE:
+                            result = crm_commands.reservation_status(
+                                _tg_crm_reservation_id(conn, booking_id),
+                                status="cancelled",
+                                event_id=_tg_crm_event_id("telegram", cq_id, booking_id, "cancel"),
+                                actor=_tg_crm_actor(actor_id, actor_name),
+                            )
+                            if result.get("accepted"):
+                                _edit_callback_booking_card(chat_id, message_id, result)
+                                _sync_admin_booking_card(conn, booking_id, result)
+                                safe_answer_callback(cq_id, "Отменено")
+                            else:
+                                safe_answer_callback(cq_id, _tg_crm_rejection_text(result))
+                            return {"ok": True}
                         mark_booking_cancelled(conn, booking_id, actor_id, actor_name)
 
                         # по желанию можно уведомлять и об отмене
@@ -562,6 +648,24 @@ def tg_webhook_impl():
                         if not table_number:
                             safe_answer_callback(cq_id, "Некорректный стол")
                             return {"ok": True}
+                        if CRM_AUTHORITATIVE:
+                            guest_fields = _maybe_local_guest_fields(b)
+                            result = crm_commands.assign_table(
+                                _tg_crm_reservation_id(conn, booking_id),
+                                table_number=table_number,
+                                guests_count=int(guest_fields["guests_count"] or 0),
+                                guest_name=str(guest_fields["guest_name"] or ""),
+                                guest_phone=str(guest_fields["guest_phone"] or ""),
+                                event_id=_tg_crm_event_id("telegram", cq_id, booking_id, "assign_override", table_number),
+                                actor=_tg_crm_actor(actor_id, actor_name),
+                            )
+                            if result.get("accepted"):
+                                _edit_callback_booking_card(chat_id, message_id, result)
+                                _sync_admin_booking_card(conn, booking_id, result)
+                                safe_answer_callback(cq_id, f"Стол #{table_number} назначен")
+                            else:
+                                safe_answer_callback(cq_id, _tg_crm_rejection_text(result))
+                            return {"ok": True}
                         try:
                             result = assign_table_to_booking(conn, booking_id, table_number, actor_id, actor_name, force_override=True)
                             _sync_admin_booking_card(conn, booking_id)
@@ -589,6 +693,19 @@ def tg_webhook_impl():
                         return {"ok": True}
 
                     if action == "clear":
+                        if CRM_AUTHORITATIVE:
+                            result = crm_commands.clear_table(
+                                _tg_crm_reservation_id(conn, booking_id),
+                                event_id=_tg_crm_event_id("telegram", cq_id, booking_id, "clear_table"),
+                                actor=_tg_crm_actor(actor_id, actor_name),
+                            )
+                            if result.get("accepted"):
+                                _edit_callback_booking_card(chat_id, message_id, result)
+                                _sync_admin_booking_card(conn, booking_id, result)
+                                safe_answer_callback(cq_id, "Стол снят")
+                            else:
+                                safe_answer_callback(cq_id, _tg_crm_rejection_text(result))
+                            return {"ok": True}
                         try:
                             result = clear_table_assignment(conn, booking_id, actor_id, actor_name)
                             _sync_admin_booking_card(conn, booking_id)
@@ -610,7 +727,7 @@ def tg_webhook_impl():
                         return {"ok": True}
 
                     if action == "restrict":
-                        assigned_table = normalize_table_number(b["assigned_table_number"])
+                        assigned_table = normalize_table_number(b["assigned_table_number"] if b else "")
                         if assigned_table:
                             _start_table_flow_prompt(
                                 conn,
@@ -747,6 +864,14 @@ def tg_webhook_impl():
             # ===== Обработка контакта (поделились контактом) =====
             contact = m.get("contact")
             if contact:
+                if CRM_AUTHORITATIVE:
+                    tg_send_message(
+                        chat_id,
+                        "Telegram-бот LUCH теперь используется только для рабочих уведомлений команды.\n"
+                        "Для бронирования используйте основной сайт или свяжитесь с площадкой.",
+                        {"remove_keyboard": True},
+                    )
+                    return {"ok": True}
                 from booking_dialog import extract_phone_from_contact, extract_name_from_contact
                 
                 phone = extract_phone_from_contact(contact)
@@ -883,6 +1008,26 @@ def tg_webhook_impl():
                             tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
                             return {"ok": True}
 
+                        if CRM_AUTHORITATIVE:
+                            booking_row = load_booking_read_model(conn, booking_id)
+                            guest_fields = _maybe_local_guest_fields(booking_row)
+                            result = crm_commands.assign_table(
+                                _tg_crm_reservation_id(conn, booking_id),
+                                table_number=table_number,
+                                guests_count=int(guest_fields["guests_count"] or 0),
+                                guest_name=str(guest_fields["guest_name"] or ""),
+                                guest_phone=str(guest_fields["guest_phone"] or ""),
+                                event_id=_tg_crm_event_id("telegram_pending", _table_row["id"], "assign_table"),
+                                actor=_tg_crm_actor(actor_id, actor_name),
+                            )
+                            if result.get("accepted"):
+                                _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                                _sync_admin_booking_card(conn, booking_id, result)
+                                tg_send_message(chat_id, f"✅ Стол #{table_number} назначен к брони #{booking_id}.")
+                            else:
+                                tg_send_message(chat_id, _tg_crm_rejection_text(result))
+                            return {"ok": True}
+
                         booking_row = load_booking_read_model(conn, booking_id)
                         if not booking_row:
                             _complete_table_flow_prompt(conn, int(_table_row["id"]))
@@ -929,6 +1074,42 @@ def tg_webhook_impl():
                         return {"ok": True}
 
                     if mode == "set_deposit":
+                        if CRM_AUTHORITATIVE:
+                            try:
+                                amount = int(text)
+                            except ValueError:
+                                tg_send_message(chat_id, "Сумма депозита должна быть положительным целым числом.")
+                                return {"ok": True}
+                            if amount <= 0:
+                                tg_send_message(chat_id, "Сумма депозита должна быть положительным целым числом.")
+                                return {"ok": True}
+                            result = crm_commands.set_deposit(
+                                _tg_crm_reservation_id(conn, booking_id),
+                                amount=amount,
+                                event_id=_tg_crm_event_id("telegram_pending", _table_row["id"], "set_deposit"),
+                                actor=_tg_crm_actor(actor_id, actor_name),
+                            )
+                            if not result.get("accepted"):
+                                tg_send_message(chat_id, _tg_crm_rejection_text(result))
+                                return {"ok": True}
+                            _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                            _sync_admin_booking_card(conn, booking_id, result)
+                            if not _command_snapshot_has_table(result):
+                                _start_table_flow_prompt(
+                                    conn,
+                                    booking_id=booking_id,
+                                    chat_id=chat_id,
+                                    actor_id=actor_id,
+                                    payload={"mode": "assign_table", "booking_id": booking_id},
+                                    prompt_text=(
+                                        f"✅ Депозит {amount} сохранён для брони #{booking_id}.\n\n"
+                                        "Чтобы информация ушла в группу официантов, у брони должны быть и депозит, и стол.\n"
+                                        "Ответьте на это сообщение номером стола."
+                                    ),
+                                )
+                                return {"ok": True}
+                            tg_send_message(chat_id, f"✅ Депозит {amount} сохранён для брони #{booking_id}.")
+                            return {"ok": True}
                         try:
                             deposit = set_booking_deposit(conn, booking_id, text, actor_id, actor_name)
                         except ValueError:
@@ -1015,6 +1196,35 @@ def tg_webhook_impl():
                             tg_send_message(chat_id, "Нужно указать положительное число часов. Пример: 3")
                             return {"ok": True}
 
+                        if CRM_AUTHORITATIVE:
+                            if booking_id:
+                                result = crm_commands.restrict_reservation_table(
+                                    _tg_crm_reservation_id(conn, booking_id),
+                                    table_number=table_number,
+                                    restricted_until=restricted_until,
+                                    event_id=_tg_crm_event_id("telegram_pending", _table_row["id"], "restrict_table"),
+                                    actor=_tg_crm_actor(actor_id, actor_name),
+                                    force_override=bool(flow.get("force_override")),
+                                )
+                            else:
+                                result = crm_commands.restrict_table(
+                                    table_number,
+                                    restricted_until=restricted_until,
+                                    event_id=_tg_crm_event_id("telegram_pending", _table_row["id"], "restrict_table"),
+                                    actor=_tg_crm_actor(actor_id, actor_name),
+                                )
+                            if result.get("accepted"):
+                                _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                                if booking_id:
+                                    _sync_admin_booking_card(conn, booking_id, result)
+                                tg_send_message(
+                                    chat_id,
+                                    f"✅ Стол #{table_number} ограничен до <code>{_h(_display_restriction_time(restricted_until))}</code>.",
+                                )
+                            else:
+                                tg_send_message(chat_id, _tg_crm_rejection_text(result))
+                            return {"ok": True}
+
                         try:
                             result = set_table_label(
                                 conn,
@@ -1097,6 +1307,19 @@ def tg_webhook_impl():
                             tg_send_message(chat_id, "Номер стола должен быть корректным. Например: 221 или 221.1.")
                             return {"ok": True}
 
+                        if CRM_AUTHORITATIVE:
+                            result = crm_commands.clear_table_restriction(
+                                table_number,
+                                event_id=_tg_crm_event_id("telegram_pending", _table_row["id"], "clear_restriction", table_number),
+                                actor=_tg_crm_actor(actor_id, actor_name),
+                            )
+                            if result.get("accepted"):
+                                _complete_table_flow_prompt(conn, int(_table_row["id"]))
+                                tg_send_message(chat_id, f"✅ Ограничение со стола #{table_number} снято.")
+                            else:
+                                tg_send_message(chat_id, _tg_crm_rejection_text(result))
+                            return {"ok": True}
+
                         result = set_table_label(conn, table_number, "NONE", actor_id, actor_name)
                         _complete_table_flow_prompt(conn, int(_table_row["id"]))
                         try:
@@ -1161,6 +1384,15 @@ def tg_webhook_impl():
                         chat_id,
                         "Вход через Telegram больше не используется.\n"
                         "Откройте CRM и войдите по логину и паролю.",
+                    )
+                    return {"ok": True}
+
+                if CRM_AUTHORITATIVE:
+                    tg_send_message(
+                        chat_id,
+                        "Telegram-бот LUCH теперь используется только для рабочих уведомлений команды.\n"
+                        "Для бронирования используйте основной сайт или свяжитесь с площадкой.",
+                        {"remove_keyboard": True},
                     )
                     return {"ok": True}
 

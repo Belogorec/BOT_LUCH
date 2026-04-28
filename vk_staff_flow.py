@@ -2,6 +2,9 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+import crm_commands
+from config import CRM_AUTHORITATIVE
+from core_sync import sync_booking_to_core
 from booking_service import (
     assign_table_to_booking,
     clear_booking_deposit,
@@ -255,6 +258,55 @@ def _booking_action_message(prefix: str, body: str) -> str:
     return f"{prefix}\n{body}".strip()
 
 
+def _crm_actor(actor_id: str, actor_name: str) -> dict[str, str]:
+    return {"id": str(actor_id or "").strip() or "vk", "name": str(actor_name or "").strip() or str(actor_id or "vk")}
+
+
+def _crm_reservation_id(conn, booking_id: int) -> int:
+    reservation_id = resolve_core_reservation_id(conn, int(booking_id or 0), allow_booking_sync=False)
+    return int(reservation_id or booking_id or 0)
+
+
+def _crm_event_id(*parts: object) -> str:
+    return ":".join(str(part or "").strip() for part in parts if str(part or "").strip())
+
+
+def _crm_rejection_text(result: dict[str, Any]) -> str:
+    error = str(result.get("error") or "crm_command_failed")
+    mapping = {
+        "table_time_conflict": "CRM отклонила действие: стол занят на это время.",
+        "table_conflict": "CRM отклонила действие: конфликт по столу.",
+        "booking_not_found": "CRM не нашла бронь.",
+        "confirmed_booking_required": "CRM отклонила действие: бронь должна быть подтверждена.",
+    }
+    return mapping.get(error, f"CRM отклонила действие: {error}")
+
+
+def _send_crm_or_reject(peer: int, result: dict[str, Any], success_text: str) -> bool:
+    if result.get("accepted"):
+        vk_send_message(peer, success_text)
+        return True
+    vk_send_message(peer, _crm_rejection_text(result))
+    return False
+
+
+def _command_snapshot_has_table(result: dict[str, Any]) -> bool:
+    reservation = result.get("reservation") if isinstance(result, dict) else {}
+    if not isinstance(reservation, dict):
+        return False
+    return bool(normalize_table_number(reservation.get("table_number")))
+
+
+def _maybe_local_guest_fields(row) -> dict[str, Any]:
+    if not row:
+        return {"guests_count": 0, "guest_name": "", "guest_phone": ""}
+    return {
+        "guests_count": int(row["guests_count"] or 0),
+        "guest_name": str(row["name"] or ""),
+        "guest_phone": str(row["phone_e164"] or row["phone_raw"] or ""),
+    }
+
+
 def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payload: dict[str, Any]) -> bool:
     if str(payload.get("kind") or "") != "booking_action":
         return False
@@ -270,6 +322,15 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
         return True
 
     if action == "confirm":
+        if CRM_AUTHORITATIVE:
+            result = crm_commands.reservation_status(
+                _crm_reservation_id(conn, booking_id),
+                status="confirmed",
+                event_id=_crm_event_id("vk", peer, from_id, booking_id, "confirm"),
+                actor=_crm_actor(actor_id, actor_name),
+            )
+            _send_crm_or_reject(peer, result, _booking_action_message("Бронь подтверждена.", f"ID: #{booking_id}"))
+            return True
         core_reservation_id = sync_booking_to_core(conn, booking_id)
         record_inbound_event(
             conn,
@@ -291,6 +352,15 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
         return True
 
     if action == "cancel":
+        if CRM_AUTHORITATIVE:
+            result = crm_commands.reservation_status(
+                _crm_reservation_id(conn, booking_id),
+                status="cancelled",
+                event_id=_crm_event_id("vk", peer, from_id, booking_id, "cancel"),
+                actor=_crm_actor(actor_id, actor_name),
+            )
+            _send_crm_or_reject(peer, result, _booking_action_message("Бронь отменена.", f"ID: #{booking_id}"))
+            return True
         mark_booking_cancelled(conn, booking_id, actor_id, actor_name)
         try:
             send_booking_event(conn, booking_id, "BOOKING_CANCELLED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"source": "vk_staff"}})
@@ -300,6 +370,14 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
         return True
 
     if action == "clear_table":
+        if CRM_AUTHORITATIVE:
+            result = crm_commands.clear_table(
+                _crm_reservation_id(conn, booking_id),
+                event_id=_crm_event_id("vk", peer, from_id, booking_id, "clear_table"),
+                actor=_crm_actor(actor_id, actor_name),
+            )
+            _send_crm_or_reject(peer, result, _booking_action_message("Стол снят.", f"Бронь #{booking_id}"))
+            return True
         clear_table_assignment(conn, booking_id, actor_id, actor_name)
         try:
             send_booking_event(
@@ -315,6 +393,14 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
         return True
 
     if action == "clear_deposit":
+        if CRM_AUTHORITATIVE:
+            result = crm_commands.clear_deposit(
+                _crm_reservation_id(conn, booking_id),
+                event_id=_crm_event_id("vk", peer, from_id, booking_id, "clear_deposit"),
+                actor=_crm_actor(actor_id, actor_name),
+            )
+            _send_crm_or_reject(peer, result, _booking_action_message("Депозит снят.", f"Бронь #{booking_id}"))
+            return True
         clear_booking_deposit(conn, booking_id, actor_id, actor_name)
         try:
             send_booking_event(conn, booking_id, "BOOKING_DEPOSIT_CLEARED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"action": "clear_deposit", "source": "vk_staff"}})
@@ -374,6 +460,24 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
         if not table_number:
             vk_send_message(peer, "Номер стола должен быть корректным. Например: 221 или 221.1.")
             return True
+        if CRM_AUTHORITATIVE:
+            booking_row = load_booking_read_model(conn, booking_id)
+            guest_fields = _maybe_local_guest_fields(booking_row)
+            result = crm_commands.assign_table(
+                _crm_reservation_id(conn, booking_id),
+                table_number=table_number,
+                guests_count=int(guest_fields["guests_count"] or 0),
+                guest_name=str(guest_fields["guest_name"] or ""),
+                guest_phone=str(guest_fields["guest_phone"] or ""),
+                event_id=_crm_event_id("vk_pending", pending_row["id"], "assign_table"),
+                actor=_crm_actor(actor_id, actor_name),
+            )
+            if result.get("accepted"):
+                _clear_vk_pending_action(conn, pending_row["id"])
+                vk_send_message(peer, f"Стол #{table_number} назначен к брони #{booking_id}.")
+            else:
+                vk_send_message(peer, _crm_rejection_text(result))
+            return True
         booking_row = load_booking_read_model(conn, booking_id)
         if not booking_row:
             _clear_vk_pending_action(conn, pending_row["id"])
@@ -408,6 +512,38 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
         return True
 
     if mode == "set_deposit":
+        if CRM_AUTHORITATIVE:
+            try:
+                amount = int(message_text)
+            except ValueError:
+                vk_send_message(peer, "Сумма депозита должна быть положительным целым числом.")
+                return True
+            if amount <= 0:
+                vk_send_message(peer, "Сумма депозита должна быть положительным целым числом.")
+                return True
+            result = crm_commands.set_deposit(
+                _crm_reservation_id(conn, booking_id),
+                amount=amount,
+                event_id=_crm_event_id("vk_pending", pending_row["id"], "set_deposit"),
+                actor=_crm_actor(actor_id, actor_name),
+            )
+            if not result.get("accepted"):
+                vk_send_message(peer, _crm_rejection_text(result))
+                return True
+            _clear_vk_pending_action(conn, pending_row["id"])
+            if not _command_snapshot_has_table(result):
+                _save_vk_pending_action(conn, peer_id=peer_id, from_id=from_id, booking_id=booking_id, mode="assign_table")
+                _send_vk_prompt(
+                    conn,
+                    peer_id=peer_id,
+                    text=(
+                        f"Депозит {amount} сохранён для брони #{booking_id}.\n"
+                        "Теперь напиши номер стола, чтобы информация ушла официантам."
+                    ),
+                )
+                return True
+            vk_send_message(peer, f"Депозит {amount} сохранён для брони #{booking_id}.")
+            return True
         try:
             result = set_booking_deposit(conn, booking_id, message_text, actor_id, actor_name)
         except ValueError:
@@ -462,6 +598,28 @@ def process_vk_pending_text(conn, *, peer_id: object, from_id: object, text: str
             return True
         if not restricted_until:
             vk_send_message(peer, "Нужно указать положительное число часов. Пример: 3")
+            return True
+        if CRM_AUTHORITATIVE:
+            if booking_id:
+                result = crm_commands.restrict_reservation_table(
+                    _crm_reservation_id(conn, booking_id),
+                    table_number=table_number,
+                    restricted_until=restricted_until,
+                    event_id=_crm_event_id("vk_pending", pending_row["id"], "restrict_table"),
+                    actor=_crm_actor(actor_id, actor_name),
+                )
+            else:
+                result = crm_commands.restrict_table(
+                    table_number,
+                    restricted_until=restricted_until,
+                    event_id=_crm_event_id("vk_pending", pending_row["id"], "restrict_table"),
+                    actor=_crm_actor(actor_id, actor_name),
+                )
+            if result.get("accepted"):
+                _clear_vk_pending_action(conn, pending_row["id"])
+                vk_send_message(peer, f"Стол #{table_number} ограничен до {str(restricted_until or '')[11:16]}.")
+            else:
+                vk_send_message(peer, _crm_rejection_text(result))
             return True
         try:
             result = set_table_label(conn, table_number, "RESTRICTED", actor_id, actor_name, restricted_until=restricted_until, booking_id=booking_id or None)

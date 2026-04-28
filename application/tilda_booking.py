@@ -1,6 +1,8 @@
+import hashlib
 import json
 from typing import Any, Optional
 
+import crm_commands
 from booking_render import render_booking_card
 from booking_service import (
     compute_segment,
@@ -8,7 +10,7 @@ from booking_service import (
     upsert_guest_if_missing,
     upsert_tilda_booking_record,
 )
-from config import TG_CHAT_ID
+from config import CRM_AUTHORITATIVE, TG_CHAT_ID
 from core_sync import sync_booking_to_core
 from crm_sync import send_booking_event
 from db import get_tags
@@ -16,6 +18,14 @@ from integration_service import create_outbox_message
 from hostess_card_delivery import dispatch_hostess_booking_card, get_hostess_card_link
 from vk_staff_notify import notify_vk_staff_about_new_booking
 from channel_binding_service import build_guest_page_public_url
+
+
+def _tilda_crm_event_id(*, tranid: str, payload: dict[str, Any]) -> str:
+    token = str(tranid or "").strip()
+    if token:
+        return f"tilda:{token}"
+    raw = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+    return "tilda:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def execute_tilda_booking_webhook(
@@ -41,6 +51,42 @@ def execute_tilda_booking_webhook(
     booking_id = None
     tg_status = "skipped"
     reservation_token = ""
+
+    if CRM_AUTHORITATIVE:
+        command_payload = {
+            "source": "tilda",
+            "external_ref": str(tranid or "").strip(),
+            "tranid": str(tranid or "").strip(),
+            "guest_name": name,
+            "guest_phone": phone_e164 or phone_raw,
+            "phone_raw": phone_raw,
+            "reservation_date": date_raw,
+            "reservation_time": time_raw,
+            "guests_count": guests_count,
+            "comment": comment,
+            "formname": formname,
+            "utm_source": utm_source,
+            "utm_medium": utm_medium,
+            "utm_campaign": utm_campaign,
+            "utm_content": utm_content,
+            "utm_term": utm_term,
+            "raw_payload": payload,
+        }
+        result = crm_commands.create_reservation(
+            payload=command_payload,
+            event_id=_tilda_crm_event_id(tranid=tranid, payload=command_payload),
+            actor={"id": "tilda", "name": "tilda"},
+        )
+        reservation = result.get("reservation") or {}
+        return {
+            "ok": bool(result.get("accepted")),
+            "booking_id": int(reservation.get("booking_id") or reservation.get("reservation_id") or 0),
+            "reservation_id": int(reservation.get("reservation_id") or 0),
+            "duplicate": bool(result.get("duplicate") or (result.get("body") or {}).get("result", {}).get("duplicate")),
+            "tg_status": "crm_authoritative_pending_delivery" if result.get("accepted") else "crm_command_rejected",
+            "guest_page_url": "",
+            "error": "" if result.get("accepted") else str(result.get("error") or "crm_command_failed"),
+        }
 
     if phone_e164:
         upsert_guest_if_missing(conn, phone_e164, name)

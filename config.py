@@ -79,6 +79,10 @@ CRM_API_URL = os.getenv("CRM_API_URL", "").strip()
 CRM_API_KEY = os.getenv("CRM_API_KEY", "").strip()
 CRM_SYNC_SHARED_SECRET = os.getenv("CRM_SYNC_SHARED_SECRET", "").strip()
 CRM_SYNC_TIMEOUT = int(os.getenv("CRM_SYNC_TIMEOUT", "8").strip() or "8")
+CRM_AUTHORITATIVE = _env_flag("CRM_AUTHORITATIVE", default=False)
+CRM_COMMAND_API_URL = os.getenv("CRM_COMMAND_API_URL", "").strip()
+CRM_COMMAND_API_KEY = os.getenv("CRM_COMMAND_API_KEY", "").strip()
+CRM_COMMAND_TIMEOUT = int(os.getenv("CRM_COMMAND_TIMEOUT", os.getenv("CRM_SYNC_TIMEOUT", "8")).strip() or "8")
 VK_HOSTESS_GROUP_ID = os.getenv("VK_HOSTESS_GROUP_ID", os.getenv("VK_GROUP_ID", "")).strip()
 VK_HOSTESS_ACCESS_TOKEN = os.getenv("VK_HOSTESS_ACCESS_TOKEN", os.getenv("VK_ACCESS_TOKEN", "")).strip()
 VK_HOSTESS_CALLBACK_SECRET = os.getenv("VK_HOSTESS_CALLBACK_SECRET", os.getenv("VK_CALLBACK_SECRET", "")).strip()
@@ -207,6 +211,11 @@ def validate_security_config() -> None:
         missing.append("CRM_API_KEY")
     if CRM_API_KEY and not CRM_API_URL:
         missing.append("CRM_API_URL")
+    if CRM_AUTHORITATIVE:
+        if not CRM_COMMAND_API_URL:
+            missing.append("CRM_COMMAND_API_URL")
+        if not CRM_COMMAND_API_KEY:
+            missing.append("CRM_COMMAND_API_KEY")
 
     for prefix, group_id, access_token, callback_secret, confirmation_token in (
         ("VK_HOSTESS", VK_HOSTESS_GROUP_ID, VK_HOSTESS_ACCESS_TOKEN, VK_HOSTESS_CALLBACK_SECRET, VK_HOSTESS_CONFIRMATION_TOKEN),

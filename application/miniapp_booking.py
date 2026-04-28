@@ -1,9 +1,10 @@
 import json
 from typing import Any
 
+import crm_commands
 from booking_render import render_booking_card
 from booking_service import create_telegram_miniapp_booking_record, log_booking_event
-from config import TG_CHAT_ID
+from config import CRM_AUTHORITATIVE, TG_CHAT_ID
 from core_sync import sync_booking_to_core
 from crm_sync import send_booking_event
 from integration_service import create_outbox_message
@@ -42,6 +43,34 @@ def execute_telegram_miniapp_booking(
         },
         ensure_ascii=False,
     )
+
+    if CRM_AUTHORITATIVE:
+        command_payload = {
+            "source": "telegram_miniapp_api",
+            "external_ref": reservation_token,
+            "reservation_token": reservation_token,
+            "guest_name": saved_name or "Telegram",
+            "guest_phone": phone_e164 or "",
+            "reservation_date": date_value,
+            "reservation_time": time_value,
+            "guests_count": guests_count,
+            "comment": comment_value,
+            "requester_tg_user_id": tg_user_id,
+            "requester_chat_id": tg_user_id,
+        }
+        result = crm_commands.create_reservation(
+            payload=command_payload,
+            event_id=f"telegram_miniapp:{reservation_token}",
+            actor={"id": str(tg_user_id or "telegram_miniapp"), "name": saved_name or "telegram_miniapp_api"},
+        )
+        reservation = result.get("reservation") or {}
+        return {
+            "ok": bool(result.get("accepted")),
+            "booking_id": int(reservation.get("booking_id") or reservation.get("reservation_id") or 0),
+            "reservation_id": int(reservation.get("reservation_id") or 0),
+            "duplicate": bool(result.get("duplicate") or (result.get("body") or {}).get("result", {}).get("duplicate")),
+            "error": "" if result.get("accepted") else str(result.get("error") or "crm_command_failed"),
+        }
 
     create_result = create_telegram_miniapp_booking_record(
         conn,

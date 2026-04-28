@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from config import (
+    CRM_AUTHORITATIVE,
     GUEST_BINDING_TOKEN_PEPPER,
     GUEST_BINDING_TOKEN_TTL_MIN,
     GUEST_COMM_ENABLED,
@@ -380,6 +381,8 @@ def create_binding_token(
     channel_type: str,
     ttl_minutes: Optional[int] = None,
 ) -> dict[str, Any]:
+    if CRM_AUTHORITATIVE:
+        raise ValueError("guest_comm_disabled_in_authoritative_mode")
     if not GUEST_COMM_ENABLED:
         raise ValueError("guest_comm_disabled")
 
@@ -610,6 +613,8 @@ def consume_binding_token_once(
     external_user_id: str,
     profile_meta: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
+    if CRM_AUTHORITATIVE:
+        return {"ok": False, "error": "guest_comm_disabled_in_authoritative_mode"}
     if not GUEST_COMM_ENABLED:
         return {"ok": False, "error": "guest_comm_disabled"}
 

@@ -21,6 +21,7 @@ from integration_schema import run_integration_schema_migrations
 from config import (
     BOT_TOKEN,
     BUSINESS_TZ_OFFSET_HOURS,
+    CRM_AUTHORITATIVE,
     CRM_SYNC_SHARED_SECRET,
     DASHBOARD_CORS_ORIGINS,
     MINIAPP_MIN_LEAD_MINUTES,
@@ -55,10 +56,12 @@ from booking_service import (
 )
 from waiter_notify import notify_waiters_about_deposit_booking
 from embedded_crm_outbox_worker import start_embedded_crm_outbox_worker
+from embedded_crm_notification_worker import start_embedded_crm_notification_worker
 
 app = Flask(__name__)
 validate_security_config()
 start_embedded_crm_outbox_worker()
+start_embedded_crm_notification_worker()
 
 
 @app.before_request
@@ -161,6 +164,12 @@ def _crm_sync_authorized(req) -> bool:
     return bool(CRM_SYNC_SHARED_SECRET) and incoming == CRM_SYNC_SHARED_SECRET
 
 
+def _crm_sync_compat_disabled_response():
+    if CRM_AUTHORITATIVE:
+        return {"ok": False, "error": "crm_authoritative_mode", "message": "Legacy CRM sync endpoint is disabled."}, 409
+    return None
+
+
 def _resolve_vk_callback_bot(payload: dict, *, require_secret: bool = True) -> dict:
     incoming_group_id = str(payload.get("group_id") or "").strip()
     bot = find_vk_bot_config_by_group_id(incoming_group_id)
@@ -256,6 +265,9 @@ def bootstrap_schema():
 def crm_sync_booking(booking_id: int):
     if not _crm_sync_authorized(request):
         return {"ok": False, "error": "forbidden"}, 403
+    disabled = _crm_sync_compat_disabled_response()
+    if disabled:
+        return disabled
 
     payload = request.get_json(silent=True) or {}
     action = str(payload.get("action") or "").strip().lower()
@@ -378,6 +390,9 @@ def crm_sync_booking(booking_id: int):
 def crm_sync_recent_bookings():
     if not _crm_sync_authorized(request):
         return {"ok": False, "error": "forbidden"}, 403
+    disabled = _crm_sync_compat_disabled_response()
+    if disabled:
+        return disabled
 
     try:
         limit = max(1, min(int(request.args.get("limit", 200) or 200), 500))
@@ -439,6 +454,9 @@ def crm_sync_recent_bookings():
 def crm_sync_manual_booking():
     if not _crm_sync_authorized(request):
         return {"ok": False, "error": "forbidden"}, 403
+    disabled = _crm_sync_compat_disabled_response()
+    if disabled:
+        return disabled
 
     payload = request.get_json(silent=True) or {}
     data = payload.get("payload") or {}
@@ -509,6 +527,9 @@ def crm_sync_manual_booking():
 def crm_sync_table():
     if not _crm_sync_authorized(request):
         return {"ok": False, "error": "forbidden"}, 403
+    disabled = _crm_sync_compat_disabled_response()
+    if disabled:
+        return disabled
 
     payload = request.get_json(silent=True) or {}
     action = str(payload.get("action") or "").strip().lower()

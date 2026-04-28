@@ -13,12 +13,14 @@ os.environ["TILDA_SECRET"] = "tilda-test-secret"
 
 try:
     from flask import request  # noqa: E402
+    import flask_app  # noqa: E402
     from flask_app import _crm_sync_authorized, app  # noqa: E402
-except ModuleNotFoundError as exc:
-    if exc.name != "flask":
+except (ModuleNotFoundError, ImportError) as exc:
+    if getattr(exc, "name", "") != "flask" and "flask" not in str(exc).lower():
         raise
     request = None
     app = None
+    flask_app = None
     _crm_sync_authorized = None
 
 
@@ -60,6 +62,20 @@ class SecurityBoundaryTests(unittest.TestCase):
             headers={"X-CRM-API-Key": "crm-test-secret"},
         ):
             self.assertFalse(_crm_sync_authorized(request))
+
+    def test_crm_sync_endpoints_are_disabled_in_authoritative_mode(self):
+        previous = flask_app.CRM_AUTHORITATIVE
+        flask_app.CRM_AUTHORITATIVE = True
+        try:
+            response = self.client.get(
+                "/admin/api/crm-sync/bookings/recent",
+                headers={"X-CRM-Sync-Secret": flask_app.CRM_SYNC_SHARED_SECRET},
+            )
+        finally:
+            flask_app.CRM_AUTHORITATIVE = previous
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["error"], "crm_authoritative_mode")
 
 
 if __name__ == "__main__":
