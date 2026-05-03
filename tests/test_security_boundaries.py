@@ -77,6 +77,41 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json["error"], "crm_authoritative_mode")
 
+    def test_crm_sync_read_endpoint_is_disabled_by_default_outside_authoritative_mode(self):
+        previous_authoritative = flask_app.CRM_AUTHORITATIVE
+        previous_read_compat = flask_app.CRM_SYNC_COMPAT_READ_ENABLED
+        flask_app.CRM_AUTHORITATIVE = False
+        flask_app.CRM_SYNC_COMPAT_READ_ENABLED = False
+        try:
+            response = self.client.get(
+                "/admin/api/crm-sync/bookings/recent",
+                headers={"X-CRM-Sync-Secret": flask_app.CRM_SYNC_SHARED_SECRET},
+            )
+        finally:
+            flask_app.CRM_AUTHORITATIVE = previous_authoritative
+            flask_app.CRM_SYNC_COMPAT_READ_ENABLED = previous_read_compat
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["error"], "rollback_only_endpoint_disabled")
+
+    def test_crm_sync_write_endpoints_are_disabled_by_default_outside_authoritative_mode(self):
+        previous_authoritative = flask_app.CRM_AUTHORITATIVE
+        previous_compat = flask_app.CRM_SYNC_COMPAT_WRITE_ENABLED
+        flask_app.CRM_AUTHORITATIVE = False
+        flask_app.CRM_SYNC_COMPAT_WRITE_ENABLED = False
+        try:
+            response = self.client.post(
+                "/admin/api/crm-sync/table",
+                headers={"X-CRM-Sync-Secret": flask_app.CRM_SYNC_SHARED_SECRET},
+                json={"action": "set_table_label", "payload": {"table_number": "221", "table_label": "RESTRICTED"}},
+            )
+        finally:
+            flask_app.CRM_AUTHORITATIVE = previous_authoritative
+            flask_app.CRM_SYNC_COMPAT_WRITE_ENABLED = previous_compat
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["error"], "rollback_only_endpoint_disabled")
+
 
 if __name__ == "__main__":
     unittest.main()

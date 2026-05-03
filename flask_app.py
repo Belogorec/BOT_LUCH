@@ -22,6 +22,8 @@ from config import (
     BOT_TOKEN,
     BUSINESS_TZ_OFFSET_HOURS,
     CRM_AUTHORITATIVE,
+    CRM_SYNC_COMPAT_READ_ENABLED,
+    CRM_SYNC_COMPAT_WRITE_ENABLED,
     CRM_SYNC_SHARED_SECRET,
     DASHBOARD_CORS_ORIGINS,
     MINIAPP_MIN_LEAD_MINUTES,
@@ -170,6 +172,32 @@ def _crm_sync_compat_disabled_response():
     return None
 
 
+def _crm_sync_write_compat_disabled_response():
+    disabled = _crm_sync_compat_disabled_response()
+    if disabled:
+        return disabled
+    if not CRM_SYNC_COMPAT_WRITE_ENABLED:
+        return {
+            "ok": False,
+            "error": "rollback_only_endpoint_disabled",
+            "message": "Legacy CRM sync write endpoint is disabled unless rollback compatibility is explicitly enabled.",
+        }, 409
+    return None
+
+
+def _crm_sync_read_compat_disabled_response():
+    disabled = _crm_sync_compat_disabled_response()
+    if disabled:
+        return disabled
+    if not CRM_SYNC_COMPAT_READ_ENABLED:
+        return {
+            "ok": False,
+            "error": "rollback_only_endpoint_disabled",
+            "message": "Legacy CRM sync read endpoint is disabled unless rollback compatibility is explicitly enabled.",
+        }, 409
+    return None
+
+
 def _resolve_vk_callback_bot(payload: dict, *, require_secret: bool = True) -> dict:
     incoming_group_id = str(payload.get("group_id") or "").strip()
     bot = find_vk_bot_config_by_group_id(incoming_group_id)
@@ -265,7 +293,7 @@ def bootstrap_schema():
 def crm_sync_booking(booking_id: int):
     if not _crm_sync_authorized(request):
         return {"ok": False, "error": "forbidden"}, 403
-    disabled = _crm_sync_compat_disabled_response()
+    disabled = _crm_sync_write_compat_disabled_response()
     if disabled:
         return disabled
 
@@ -390,7 +418,7 @@ def crm_sync_booking(booking_id: int):
 def crm_sync_recent_bookings():
     if not _crm_sync_authorized(request):
         return {"ok": False, "error": "forbidden"}, 403
-    disabled = _crm_sync_compat_disabled_response()
+    disabled = _crm_sync_read_compat_disabled_response()
     if disabled:
         return disabled
 
@@ -454,7 +482,7 @@ def crm_sync_recent_bookings():
 def crm_sync_manual_booking():
     if not _crm_sync_authorized(request):
         return {"ok": False, "error": "forbidden"}, 403
-    disabled = _crm_sync_compat_disabled_response()
+    disabled = _crm_sync_write_compat_disabled_response()
     if disabled:
         return disabled
 
@@ -527,7 +555,7 @@ def crm_sync_manual_booking():
 def crm_sync_table():
     if not _crm_sync_authorized(request):
         return {"ok": False, "error": "forbidden"}, 403
-    disabled = _crm_sync_compat_disabled_response()
+    disabled = _crm_sync_write_compat_disabled_response()
     if disabled:
         return disabled
 
