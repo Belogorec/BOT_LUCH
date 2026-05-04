@@ -299,7 +299,6 @@ Runtime routes:
 - `POST /admin/api/crm-sync/booking/<booking_id>` -> CRM-to-BOT domain sync
 - `POST /admin/api/crm-sync/manual-booking` -> CRM asks BOT to create a legacy booking
 - `POST /admin/api/crm-sync/table` -> CRM-to-BOT table sync
-- `GET /admin/api/crm-sync/bookings/recent` -> CRM pulls recent BOT bookings
 - dashboard helper routes: `/admin/api/segments`, `/admin/api/load`
 
 Workers:

@@ -22,7 +22,6 @@ from config import (
     BOT_TOKEN,
     BUSINESS_TZ_OFFSET_HOURS,
     CRM_AUTHORITATIVE,
-    CRM_SYNC_COMPAT_READ_ENABLED,
     CRM_SYNC_COMPAT_WRITE_ENABLED,
     CRM_SYNC_SHARED_SECRET,
     DASHBOARD_CORS_ORIGINS,
@@ -181,19 +180,6 @@ def _crm_sync_write_compat_disabled_response():
             "ok": False,
             "error": "rollback_only_endpoint_disabled",
             "message": "Legacy CRM sync write endpoint is disabled unless rollback compatibility is explicitly enabled.",
-        }, 409
-    return None
-
-
-def _crm_sync_read_compat_disabled_response():
-    disabled = _crm_sync_compat_disabled_response()
-    if disabled:
-        return disabled
-    if not CRM_SYNC_COMPAT_READ_ENABLED:
-        return {
-            "ok": False,
-            "error": "rollback_only_endpoint_disabled",
-            "message": "Legacy CRM sync read endpoint is disabled unless rollback compatibility is explicitly enabled.",
         }, 409
     return None
 
@@ -409,70 +395,6 @@ def crm_sync_booking(booking_id: int):
         return {"ok": False, "error": str(exc)}, 400
     except Exception as exc:
         conn.rollback()
-        return {"ok": False, "error": str(exc)}, 500
-    finally:
-        conn.close()
-
-
-@app.route("/admin/api/crm-sync/bookings/recent", methods=["GET"])
-def crm_sync_recent_bookings():
-    if not _crm_sync_authorized(request):
-        return {"ok": False, "error": "forbidden"}, 403
-    disabled = _crm_sync_read_compat_disabled_response()
-    if disabled:
-        return disabled
-
-    try:
-        limit = max(1, min(int(request.args.get("limit", 200) or 200), 500))
-    except (TypeError, ValueError):
-        limit = 200
-
-    try:
-        days = max(1, min(int(request.args.get("days", 30) or 30), 180))
-    except (TypeError, ValueError):
-        days = 30
-
-    conn = connect()
-    try:
-        from crm_sync import build_booking_sync_payload
-
-        rows = conn.execute(
-            """
-            SELECT external_ref
-            FROM reservations
-            WHERE source='legacy_booking'
-              AND COALESCE(status, 'pending') NOT IN ('declined', 'cancelled', 'no_show', 'completed')
-              AND external_ref IS NOT NULL
-              AND trim(external_ref) <> ''
-              AND (
-                    datetime(replace(reservation_at, 'T', ' ')) >= datetime('now', '-1 day')
-                    OR datetime(updated_at) >= datetime('now', ?)
-                  )
-            ORDER BY
-              CASE
-                WHEN trim(COALESCE(reservation_at, '')) <> '' THEN 0
-                ELSE 1
-              END ASC,
-              datetime(replace(COALESCE(reservation_at, ''), 'T', ' ')) ASC,
-              datetime(updated_at) DESC,
-              id DESC
-            LIMIT ?
-            """,
-            (f"-{int(days)} days", int(limit)),
-        ).fetchall()
-
-        items = [
-            build_booking_sync_payload(
-                conn,
-                int(row["external_ref"]),
-                "BOOKING_UPSERT",
-                {"actor_tg_id": "system", "actor_name": "recent_pull", "payload": {"source": "recent_pull"}},
-            )
-            for row in rows
-            if str(row["external_ref"]).strip().isdigit()
-        ]
-        return {"ok": True, "items": items, "count": len(items)}, 200
-    except Exception as exc:
         return {"ok": False, "error": str(exc)}, 500
     finally:
         conn.close()

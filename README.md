@@ -49,7 +49,6 @@ Telegram / Mini App / Tilda
 - `CRM_API_URL`
 - `CRM_API_KEY`
 - `CRM_SYNC_SHARED_SECRET`
-- `CRM_SYNC_COMPAT_READ_ENABLED` — explicit opt-in only for old `/admin/api/crm-sync/bookings/recent` rollback pull path
 - `CRM_SYNC_COMPAT_WRITE_ENABLED` — explicit opt-in only for old `/admin/api/crm-sync/*` write rollback paths
 - `CRM_OUTBOX_INTERVAL_SEC`
 - `CRM_OUTBOX_BATCH_LIMIT`
@@ -116,8 +115,7 @@ curl -s http://localhost:5000/health
 
 Rollback surface policy:
 - `CRM_AUTHORITATIVE=1` — old `/admin/api/crm-sync/*` endpoints disabled.
-- `CRM_AUTHORITATIVE=0`, `CRM_SYNC_COMPAT_READ_ENABLED=0`, and `CRM_SYNC_COMPAT_WRITE_ENABLED=0` — old CRM-to-BOT compatibility endpoints stay disabled in normal runtime.
-- `CRM_SYNC_COMPAT_READ_ENABLED=1` — enable old `/admin/api/crm-sync/bookings/recent` pull path only for controlled rollback or compatibility debugging.
+- `CRM_AUTHORITATIVE=0` and `CRM_SYNC_COMPAT_WRITE_ENABLED=0` — old CRM-to-BOT compatibility endpoints stay disabled in normal runtime.
 - `CRM_SYNC_COMPAT_WRITE_ENABLED=1` — enable old CRM-to-BOT write endpoints only for controlled rollback or compatibility debugging.
 
 ## Официанты
