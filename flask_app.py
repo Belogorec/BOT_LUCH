@@ -22,8 +22,6 @@ from config import (
     BOT_TOKEN,
     BUSINESS_TZ_OFFSET_HOURS,
     CRM_AUTHORITATIVE,
-    CRM_SYNC_COMPAT_WRITE_ENABLED,
-    CRM_SYNC_SHARED_SECRET,
     DASHBOARD_CORS_ORIGINS,
     MINIAPP_MIN_LEAD_MINUTES,
     PUBLIC_CORS_ORIGINS,
@@ -42,20 +40,8 @@ from vk_staff_flow import parse_vk_event_payload, parse_vk_message_payload, proc
 from vk_staff_notify import upsert_vk_staff_peer
 from booking_render import render_booking_card
 from booking_service import (
-    assign_table_to_booking,
-    clear_booking_deposit,
-    clear_table_assignment,
-    create_manual_booking,
-    load_booking_read_model,
-    normalize_table_number,
     resolve_core_reservation_id,
-    reschedule_booking,
-    set_booking_status,
-    set_booking_deposit,
-    set_table_label,
-    update_booking_guests_count,
 )
-from waiter_notify import notify_waiters_about_deposit_booking
 from embedded_crm_outbox_worker import start_embedded_crm_outbox_worker
 from embedded_crm_notification_worker import start_embedded_crm_notification_worker
 
@@ -160,30 +146,6 @@ def ensure_db():
   return connect()
 
 
-def _crm_sync_authorized(req) -> bool:
-    incoming = str(req.headers.get("X-CRM-Sync-Secret") or "").strip()
-    return bool(CRM_SYNC_SHARED_SECRET) and incoming == CRM_SYNC_SHARED_SECRET
-
-
-def _crm_sync_compat_disabled_response():
-    if CRM_AUTHORITATIVE:
-        return {"ok": False, "error": "crm_authoritative_mode", "message": "Legacy CRM sync endpoint is disabled."}, 409
-    return None
-
-
-def _crm_sync_write_compat_disabled_response():
-    disabled = _crm_sync_compat_disabled_response()
-    if disabled:
-        return disabled
-    if not CRM_SYNC_COMPAT_WRITE_ENABLED:
-        return {
-            "ok": False,
-            "error": "rollback_only_endpoint_disabled",
-            "message": "Legacy CRM sync write endpoint is disabled unless rollback compatibility is explicitly enabled.",
-        }, 409
-    return None
-
-
 def _resolve_vk_callback_bot(payload: dict, *, require_secret: bool = True) -> dict:
     incoming_group_id = str(payload.get("group_id") or "").strip()
     bot = find_vk_bot_config_by_group_id(incoming_group_id)
@@ -210,10 +172,6 @@ def _refresh_admin_booking_card(conn, booking_id: int) -> None:
         return
     text, kb = render_booking_card(conn, booking_id)
     tg_edit_message(link["chat_id"], link["message_id"], text, kb)
-
-
-def _crm_set_booking_status(conn, booking_id: int, status: str, actor_id: str, actor_name: str) -> None:
-    set_booking_status(conn, booking_id, status, actor_id, actor_name, source="crm")
 
 
 def validate_telegram_init_data(init_data_str: str) -> tuple[bool, dict]:
@@ -273,250 +231,6 @@ def bootstrap_schema():
     conn.commit()
   finally:
     conn.close()
-
-
-@app.route("/admin/api/crm-sync/booking/<int:booking_id>", methods=["POST"])
-def crm_sync_booking(booking_id: int):
-    if not _crm_sync_authorized(request):
-        return {"ok": False, "error": "forbidden"}, 403
-    disabled = _crm_sync_write_compat_disabled_response()
-    if disabled:
-        return disabled
-
-    payload = request.get_json(silent=True) or {}
-    action = str(payload.get("action") or "").strip().lower()
-    data = payload.get("payload") or {}
-    actor_id = str(payload.get("actor_tg_id") or "crm")
-    actor_name = str(payload.get("actor_name") or "crm")
-
-    conn = connect()
-    should_notify_waiters = False
-    try:
-        booking = load_booking_read_model(conn, booking_id)
-        if not booking:
-            return {"ok": False, "error": "booking_not_found"}, 404
-
-        if action == "confirm":
-            _crm_set_booking_status(conn, booking_id, "CONFIRMED", actor_id, actor_name)
-        elif action == "decline":
-            _crm_set_booking_status(conn, booking_id, "DECLINED", actor_id, actor_name)
-        elif action == "cancel":
-            _crm_set_booking_status(conn, booking_id, "CANCELLED", actor_id, actor_name)
-        elif action == "no_show":
-            _crm_set_booking_status(conn, booking_id, "NO_SHOW", actor_id, actor_name)
-        elif action == "complete":
-            _crm_set_booking_status(conn, booking_id, "COMPLETED", actor_id, actor_name)
-        elif action == "reschedule":
-            reservation_date = str(data.get("reservation_date") or "").strip()
-            reservation_time = normalize_time_hhmm(data.get("reservation_time") or "")
-            reschedule_booking(
-                conn,
-                booking_id,
-                reservation_date,
-                reservation_time,
-                actor_id,
-                actor_name,
-                source="crm",
-            )
-        elif action == "update_guests":
-            update_booking_guests_count(
-                conn,
-                booking_id,
-                data.get("guests_count"),
-                actor_id,
-                actor_name,
-                source="crm",
-            )
-        elif action == "assign_table":
-            table_number = normalize_table_number(data.get("table_number"))
-            if not table_number:
-                return {"ok": False, "error": "invalid_table_number"}, 400
-            assign_table_to_booking(
-                conn,
-                booking_id,
-                table_number,
-                actor_id,
-                actor_name,
-                force_override=str(data.get("force_override") or "").strip() == "1",
-            )
-            should_notify_waiters = True
-        elif action == "clear_table":
-            clear_table_assignment(conn, booking_id, actor_id, actor_name)
-        elif action == "restrict_table":
-            table_number = normalize_table_number(data.get("table_number"))
-            if not table_number:
-                table_number = normalize_table_number(booking.get("assigned_table_number"))
-            if not table_number:
-                return {"ok": False, "error": "invalid_table_number"}, 400
-            set_table_label(
-                conn,
-                table_number,
-                "RESTRICTED",
-                actor_id,
-                actor_name,
-                restricted_until=str(data.get("restricted_until") or "").strip(),
-                restriction_comment=str(data.get("table_comment") or "").strip(),
-                booking_id=booking_id,
-                force_override=str(data.get("force_override") or "").strip() == "1",
-            )
-        elif action == "clear_table_restriction":
-            table_number = normalize_table_number(data.get("table_number") or booking.get("assigned_table_number"))
-            if not table_number:
-                return {"ok": False, "error": "invalid_table_number"}, 400
-            set_table_label(conn, table_number, "NONE", actor_id, actor_name, booking_id=booking_id)
-        elif action == "set_deposit":
-            set_booking_deposit(
-                conn,
-                booking_id,
-                data.get("deposit_amount"),
-                actor_id,
-                actor_name,
-                comment=str(data.get("deposit_comment") or "").strip(),
-            )
-            should_notify_waiters = True
-        elif action == "clear_deposit":
-            clear_booking_deposit(conn, booking_id, actor_id, actor_name)
-        else:
-            return {"ok": False, "error": "action_not_supported"}, 400
-
-        conn.commit()
-        try:
-            _refresh_admin_booking_card(conn, booking_id)
-        except Exception:
-            pass
-        if should_notify_waiters:
-            try:
-                notify_waiters_about_deposit_booking(conn, booking_id)
-            except Exception:
-                pass
-        return {"ok": True, "booking_id": booking_id}, 200
-    except ValueError as exc:
-        conn.rollback()
-        return {"ok": False, "error": str(exc)}, 400
-    except Exception as exc:
-        conn.rollback()
-        return {"ok": False, "error": str(exc)}, 500
-    finally:
-        conn.close()
-
-
-@app.route("/admin/api/crm-sync/manual-booking", methods=["POST"])
-def crm_sync_manual_booking():
-    if not _crm_sync_authorized(request):
-        return {"ok": False, "error": "forbidden"}, 403
-    disabled = _crm_sync_write_compat_disabled_response()
-    if disabled:
-        return disabled
-
-    payload = request.get_json(silent=True) or {}
-    data = payload.get("payload") or {}
-    actor_id = str(payload.get("actor_tg_id") or "crm")
-    actor_name = str(payload.get("actor_name") or "crm")
-
-    guest_name = str(data.get("guest_name") or "").strip() or "CRM"
-    guest_phone = str(data.get("guest_phone") or "").strip() or None
-    reservation_date = str(data.get("reservation_date") or "").strip()
-    reservation_time = normalize_time_hhmm(data.get("reservation_time") or "")
-    comment = str(data.get("table_comment") or data.get("comment") or "").strip()
-    table_number = normalize_table_number(data.get("table_number"))
-    session_mode = str(data.get("session_mode") or "").strip().lower()
-
-    try:
-        guests_count = int(str(data.get("guests_count") or "").strip())
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "invalid_guests_count"}, 400
-    if guests_count <= 0:
-        return {"ok": False, "error": "invalid_guests_count"}, 400
-
-    if not reservation_date:
-        reservation_date = datetime.utcnow().strftime("%Y-%m-%d")
-    if not reservation_time:
-        reservation_time = datetime.utcnow().strftime("%H:%M")
-
-    conn = connect()
-    try:
-        result = create_manual_booking(
-            conn,
-            guest_name=guest_name,
-            guest_phone=guest_phone,
-            reservation_date=reservation_date,
-            reservation_time=reservation_time,
-            guests_count=guests_count,
-            comment=comment,
-            actor_id=actor_id,
-            actor_name=actor_name,
-            table_number=table_number,
-            session_mode=session_mode,
-            deposit_amount=data.get("deposit_amount"),
-            deposit_comment=str(data.get("deposit_comment") or "").strip(),
-        )
-        booking_id = int(result["booking_id"])
-        conn.commit()
-
-        try:
-            _refresh_admin_booking_card(conn, booking_id)
-        except Exception:
-            pass
-        if result.get("notify_waiters"):
-            try:
-                notify_waiters_about_deposit_booking(conn, booking_id)
-            except Exception:
-                pass
-        return {"ok": True, "booking_id": booking_id}, 200
-    except ValueError as exc:
-        conn.rollback()
-        return {"ok": False, "error": str(exc)}, 400
-    except Exception as exc:
-        conn.rollback()
-        return {"ok": False, "error": str(exc)}, 500
-    finally:
-        conn.close()
-
-
-@app.route("/admin/api/crm-sync/table", methods=["POST"])
-def crm_sync_table():
-    if not _crm_sync_authorized(request):
-        return {"ok": False, "error": "forbidden"}, 403
-    disabled = _crm_sync_write_compat_disabled_response()
-    if disabled:
-        return disabled
-
-    payload = request.get_json(silent=True) or {}
-    action = str(payload.get("action") or "").strip().lower()
-    data = payload.get("payload") or {}
-    actor_id = str(payload.get("actor_tg_id") or "crm")
-    actor_name = str(payload.get("actor_name") or "crm")
-    table_number = normalize_table_number(data.get("table_number"))
-    if not table_number:
-        return {"ok": False, "error": "invalid_table_number"}, 400
-
-    conn = connect()
-    try:
-        if action == "clear_table_restriction":
-            set_table_label(conn, table_number, "NONE", actor_id, actor_name)
-        elif action == "set_table_label":
-            set_table_label(
-                conn,
-                table_number,
-                str(data.get("table_label") or "").strip().upper(),
-                actor_id,
-                actor_name,
-                restricted_until=str(data.get("restricted_until") or "").strip(),
-                restriction_comment=str(data.get("table_comment") or "").strip(),
-                force_override=str(data.get("force_override") or "").strip() == "1",
-            )
-        else:
-            return {"ok": False, "error": "action_not_supported"}, 400
-        conn.commit()
-        return {"ok": True, "table_number": table_number}, 200
-    except ValueError as exc:
-        conn.rollback()
-        return {"ok": False, "error": str(exc)}, 400
-    except Exception as exc:
-        conn.rollback()
-        return {"ok": False, "error": str(exc)}, 500
-    finally:
-        conn.close()
 
 
 bootstrap_schema()

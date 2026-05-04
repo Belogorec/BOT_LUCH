@@ -77,9 +77,7 @@ TABLE_RESERVATION_DURATION_MINUTES = int(os.getenv("TABLE_RESERVATION_DURATION_M
 TABLE_RESERVATION_BUFFER_MINUTES = int(os.getenv("TABLE_RESERVATION_BUFFER_MINUTES", "0").strip() or "0")
 CRM_API_URL = os.getenv("CRM_API_URL", "").strip()
 CRM_API_KEY = os.getenv("CRM_API_KEY", "").strip()
-CRM_SYNC_SHARED_SECRET = os.getenv("CRM_SYNC_SHARED_SECRET", "").strip()
 CRM_SYNC_TIMEOUT = int(os.getenv("CRM_SYNC_TIMEOUT", "8").strip() or "8")
-CRM_SYNC_COMPAT_WRITE_ENABLED = _env_flag("CRM_SYNC_COMPAT_WRITE_ENABLED", default=False)
 CRM_AUTHORITATIVE = _env_flag("CRM_AUTHORITATIVE", default=False)
 CRM_COMMAND_API_URL = os.getenv("CRM_COMMAND_API_URL", "").strip()
 CRM_COMMAND_API_KEY = os.getenv("CRM_COMMAND_API_KEY", "").strip()
@@ -203,7 +201,6 @@ def validate_security_config() -> None:
         "DASHBOARD_SECRET": DASHBOARD_SECRET,
         "TILDA_SECRET": TILDA_SECRET,
         "MINIAPP_URL": MINIAPP_URL,
-        "CRM_SYNC_SHARED_SECRET": CRM_SYNC_SHARED_SECRET,
     }.items():
         if not value:
             missing.append(name)

@@ -48,8 +48,6 @@ Telegram / Mini App / Tilda
 - `WAITER_CHAT_ID`
 - `CRM_API_URL`
 - `CRM_API_KEY`
-- `CRM_SYNC_SHARED_SECRET`
-- `CRM_SYNC_COMPAT_WRITE_ENABLED` — explicit opt-in only for old `/admin/api/crm-sync/*` write rollback paths
 - `CRM_OUTBOX_INTERVAL_SEC`
 - `CRM_OUTBOX_BATCH_LIMIT`
 - `CRM_OUTBOX_MAX_ATTEMPTS`
@@ -69,7 +67,7 @@ Telegram / Mini App / Tilda
 - `VK_CONFIRMATION_TOKEN`
 - `VK_API_VERSION`
 
-Security-critical переменные (`BOT_TOKEN`, `TG_WEBHOOK_SECRET`, `TILDA_SECRET`, `DASHBOARD_SECRET`, `MINIAPP_URL`, `CRM_SYNC_SHARED_SECRET`) обязательны для запуска. Для локальной диагностики без них можно явно поставить `ALLOW_INSECURE_DEFAULTS=1`, но в production это использовать нельзя.
+Security-critical переменные (`BOT_TOKEN`, `TG_WEBHOOK_SECRET`, `TILDA_SECRET`, `DASHBOARD_SECRET`, `MINIAPP_URL`) обязательны для запуска. Для локальной диагностики без них можно явно поставить `ALLOW_INSECURE_DEFAULTS=1`, но в production это использовать нельзя.
 
 Старый Telegram auth-flow для CRM удалён. Вход в CRM выполняется по логину и паролю.
 
@@ -113,10 +111,8 @@ curl -s http://localhost:5000/health
 - `TG-WEBHOOK` — пришёл ли `callback_query`, не был ли update дублем.
 - `CRM_SYNC` — ушло ли событие в CRM.
 
-Rollback surface policy:
-- `CRM_AUTHORITATIVE=1` — old `/admin/api/crm-sync/*` endpoints disabled.
-- `CRM_AUTHORITATIVE=0` and `CRM_SYNC_COMPAT_WRITE_ENABLED=0` — old CRM-to-BOT compatibility endpoints stay disabled in normal runtime.
-- `CRM_SYNC_COMPAT_WRITE_ENABLED=1` — enable old CRM-to-BOT write endpoints only for controlled rollback or compatibility debugging.
+Legacy CRM-to-BOT `/admin/api/crm-sync/*` compatibility endpoints have been removed from runtime.
+Current cutover behavior relies on CRM command APIs plus bot-side delivery/outbox mechanics instead of reverse domain sync from CRM into BOT.
 
 ## Официанты
 

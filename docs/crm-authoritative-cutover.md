@@ -296,9 +296,6 @@ Runtime routes:
 - `POST /vk/callback` -> `vk_staff_flow.py` handlers from `flask_app.py`
 - `POST /api/booking` -> Telegram Mini App booking API
 - `GET /public/api/guest` -> public guest reservation page data
-- `POST /admin/api/crm-sync/booking/<booking_id>` -> CRM-to-BOT domain sync
-- `POST /admin/api/crm-sync/manual-booking` -> CRM asks BOT to create a legacy booking
-- `POST /admin/api/crm-sync/table` -> CRM-to-BOT table sync
 - dashboard helper routes: `/admin/api/segments`, `/admin/api/load`
 
 Workers:
