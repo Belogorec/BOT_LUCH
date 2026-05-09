@@ -15,6 +15,7 @@ from core_sync import sync_booking_to_core
 from crm_sync import send_booking_event
 from db import get_tags
 from integration_service import create_outbox_message
+from local_log import log_event
 from hostess_card_delivery import dispatch_hostess_booking_card, get_hostess_card_link
 from vk_staff_notify import notify_vk_staff_about_new_booking
 from channel_binding_service import build_guest_page_public_url
@@ -51,6 +52,7 @@ def execute_tilda_booking_webhook(
     booking_id = None
     tg_status = "skipped"
     reservation_token = ""
+    resolved_guests_count = int(guests_count or 0) if int(guests_count or 0) > 0 else 2
 
     if CRM_AUTHORITATIVE:
         command_payload = {
@@ -62,7 +64,7 @@ def execute_tilda_booking_webhook(
             "phone_raw": phone_raw,
             "reservation_date": date_raw,
             "reservation_time": time_raw,
-            "guests_count": guests_count,
+            "guests_count": resolved_guests_count,
             "comment": comment,
             "formname": formname,
             "utm_source": utm_source,
@@ -77,6 +79,15 @@ def execute_tilda_booking_webhook(
             event_id=_tilda_crm_event_id(tranid=tranid, payload=command_payload),
             actor={"id": "tilda", "name": "tilda"},
         )
+        if not result.get("accepted"):
+            log_event(
+                "TILDA-BOOKING",
+                status="crm_command_rejected",
+                tranid=str(tranid or "").strip() or "-",
+                formname=formname or "-",
+                guests_count=resolved_guests_count,
+                error=str(result.get("error") or "crm_command_failed"),
+            )
         reservation = result.get("reservation") or {}
         return {
             "ok": bool(result.get("accepted")),

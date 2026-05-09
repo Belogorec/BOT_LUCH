@@ -84,6 +84,49 @@ class AuthoritativeIncomingBookingTests(unittest.TestCase):
         self.assertEqual(calls[0]["event_id"], "tilda:tran-55")
         self.assertEqual(calls[0]["payload"]["source"], "tilda")
         self.assertEqual(calls[0]["payload"]["reservation_date"], "2026-05-01")
+        self.assertEqual(calls[0]["payload"]["guests_count"], 2)
+
+    def test_tilda_authoritative_defaults_missing_guest_count_to_two(self):
+        conn = self._connect()
+        calls = []
+        original_create = tilda_booking.crm_commands.create_reservation
+
+        def _fake_create(*, payload, event_id, actor):
+            calls.append({"payload": payload, "event_id": event_id, "actor": actor})
+            return {
+                "accepted": True,
+                "ok": True,
+                "reservation": {"reservation_id": 56, "booking_id": 56},
+                "body": {"result": {"duplicate": False}},
+            }
+
+        tilda_booking.crm_commands.create_reservation = _fake_create
+        try:
+            result = tilda_booking.execute_tilda_booking_webhook(
+                conn,
+                payload={"tranid": "tran-56"},
+                name="Кристина",
+                phone_raw="89195893420",
+                phone_e164="+79195893420",
+                date_raw="2026-05-09",
+                time_raw="22:00",
+                guests_count=None,
+                comment="",
+                tranid="tran-56",
+                formname="Бронь стола (instagram)",
+                utm_source="ig",
+                utm_medium="social",
+                utm_campaign="",
+                utm_content="link_in_bio",
+                utm_term="",
+            )
+        finally:
+            tilda_booking.crm_commands.create_reservation = original_create
+            conn.close()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["payload"]["guests_count"], 2)
 
     def test_miniapp_authoritative_create_calls_crm_without_local_booking(self):
         conn = self._connect()
