@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import crm_commands
-from config import CRM_AUTHORITATIVE
+from config import CRM_AUTHORITATIVE, VK_HOSTESS_PEER_IDS
 from core_sync import sync_booking_to_core
 from booking_service import (
     assign_table_to_booking,
@@ -20,6 +20,7 @@ from booking_service import (
     set_table_label,
 )
 from crm_sync import send_booking_event, send_table_event
+from crm_staff_links import ARCHIVED_BOOKING_STATUSES, append_crm_staff_booking_link
 from integration_service import create_outbox_message, mark_inbound_event_processed, record_inbound_event
 from outbox_dispatcher import dispatch_outbox_message
 from vk_api import vk_send_message
@@ -134,7 +135,8 @@ def render_vk_booking_message(conn, booking_id: int) -> str:
         lines.append(f"Комментарий: {comment}")
     lines.append("")
     lines.append("Кнопки ниже управляют бронью прямо из рабочего VK-чата.")
-    return "\n".join(lines)
+    archived = str(row["status"] or "").strip().lower() in ARCHIVED_BOOKING_STATUSES
+    return append_crm_staff_booking_link("\n".join(lines), archived=archived)
 
 
 def send_vk_booking_card(conn, peer_id: int, booking_id: int) -> None:
@@ -352,6 +354,7 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
         return True
 
     if action == "cancel":
+        success_text = _booking_action_message("Бронь отменена.", f"ID: #{booking_id}")
         if CRM_AUTHORITATIVE:
             result = crm_commands.reservation_status(
                 _crm_reservation_id(conn, booking_id),
@@ -359,14 +362,17 @@ def process_vk_booking_payload(conn, *, peer_id: object, from_id: object, payloa
                 event_id=_crm_event_id("vk", peer, from_id, booking_id, "cancel"),
                 actor=_crm_actor(actor_id, actor_name),
             )
-            _send_crm_or_reject(peer, result, _booking_action_message("Бронь отменена.", f"ID: #{booking_id}"))
+            reservation = result.get("reservation") if str(peer) in VK_HOSTESS_PEER_IDS else None
+            if not isinstance(reservation, dict):
+                reservation = None
+            _send_crm_or_reject(peer, result, append_crm_staff_booking_link(success_text, reservation, archived=True))
             return True
         mark_booking_cancelled(conn, booking_id, actor_id, actor_name)
         try:
             send_booking_event(conn, booking_id, "BOOKING_CANCELLED", {"actor_tg_id": actor_id, "actor_name": actor_name, "payload": {"source": "vk_staff"}})
         except Exception:
             pass
-        vk_send_message(peer, _booking_action_message("Бронь отменена.", f"ID: #{booking_id}"))
+        vk_send_message(peer, append_crm_staff_booking_link(success_text, archived=True))
         return True
 
     if action == "clear_table":

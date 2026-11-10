@@ -2,15 +2,22 @@ import html
 from datetime import datetime
 
 from booking_service import compute_segment, get_guest_summary, load_booking_read_model
+from crm_staff_links import ARCHIVED_BOOKING_STATUSES, crm_staff_booking_link
 
 
 def _h(s: str) -> str:
     return html.escape(s or "", quote=False)
 
 
-def _booking_card_keyboard(booking_id: int) -> dict:
+def _booking_card_keyboard(booking_id: int, status: str, *, reservation=None, include_crm_link: bool) -> dict:
     def btn(text_, data_):
         return {"text": text_, "callback_data": data_}
+
+    archived = str(status or "").strip().lower() in ARCHIVED_BOOKING_STATUSES
+    crm_keyboard = booking_crm_keyboard(reservation, archived=archived) if include_crm_link else None
+    crm_rows = crm_keyboard["inline_keyboard"] if crm_keyboard else []
+    if archived and crm_rows:
+        return crm_keyboard
 
     return {
         "inline_keyboard": [
@@ -33,11 +40,16 @@ def _booking_card_keyboard(booking_id: int) -> dict:
             [
                 btn("✍️ Комментарий к гостю", f"b:{booking_id}:note"),
             ],
-        ]
+        ] + crm_rows
     }
 
 
-def render_booking_card_from_reservation(reservation: dict) -> tuple[str, dict]:
+def booking_crm_keyboard(reservation=None, *, archived: bool = False) -> dict:
+    label, url = crm_staff_booking_link(reservation, archived=archived)
+    return {"inline_keyboard": [[{"text": label, "url": url}]]} if url else {"inline_keyboard": []}
+
+
+def render_booking_card_from_reservation(reservation: dict, *, include_crm_link: bool = True) -> tuple[str, dict]:
     booking_id = int(reservation.get("booking_id") or reservation.get("reservation_id") or 0)
     if booking_id <= 0:
         return ("Бронь не найдена.", {"inline_keyboard": []})
@@ -92,10 +104,12 @@ def render_booking_card_from_reservation(reservation: dict) -> tuple[str, dict]:
         "",
         f"<i>Обновлено из CRM: {_h(datetime.now().strftime('%H:%M:%S'))}</i>",
     ])
-    return "\n".join(text_parts), _booking_card_keyboard(booking_id)
+    return "\n".join(text_parts), _booking_card_keyboard(
+        booking_id, status, reservation=reservation, include_crm_link=include_crm_link,
+    )
 
 
-def render_booking_card(conn, booking_id: int) -> tuple[str, dict]:
+def render_booking_card(conn, booking_id: int, *, include_crm_link: bool = True) -> tuple[str, dict]:
     """
     Рендерит компактную карточку брони для админов.
     Содержит: номер, статус, дата/время, гостей, имя, телефон, статус гостя (на русском),
@@ -186,7 +200,7 @@ def render_booking_card(conn, booking_id: int) -> tuple[str, dict]:
     text_parts.extend(["", f"<i>Обновлено: {_h(datetime.now().strftime('%H:%M:%S'))}</i>"])
     text = "\n".join([p for p in text_parts if p is not None])
 
-    kb = _booking_card_keyboard(booking_id)
+    kb = _booking_card_keyboard(booking_id, b["status"], include_crm_link=include_crm_link)
 
     return text, kb
 

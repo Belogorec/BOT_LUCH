@@ -1,9 +1,68 @@
 import unittest
+from unittest.mock import patch
 
 import crm_notification_worker
+import crm_staff_links
+from booking_render import booking_crm_keyboard
 
 
 class CrmNotificationWorkerTests(unittest.TestCase):
+    def test_staff_restore_link_uses_exact_reservation_and_preserves_active_controls(self):
+        reservation = {"reservation_id": 55, "booking_id": 42, "status": "cancelled"}
+        job = {
+            "platform": "telegram",
+            "bot_scope": "hostess",
+            "target_external_id": "-100",
+            "message_type": "reservation_card_upsert",
+            "payload": {"reservation": reservation, "message_id": "msg-1"},
+        }
+        expected_url = "https://crm.example.test/crm/bookings/42?reservation_id=55#restore-booking"
+        with (
+            patch.object(crm_staff_links, "CRM_COMMAND_API_URL", "https://crm.example.test"),
+            patch.object(crm_notification_worker, "tg_edit_message") as edit,
+        ):
+            crm_notification_worker.dispatch_notification_job(job)
+            self.assertEqual(
+                edit.call_args.args[3],
+                {"inline_keyboard": [[{"text": "Восстановить в CRM", "url": expected_url}]]},
+            )
+            reservation["status"] = "pending"
+            crm_notification_worker.dispatch_notification_job(job)
+            keyboard = edit.call_args.args[3]["inline_keyboard"]
+            self.assertEqual(keyboard[0][0]["callback_data"], "b:42:booking:confirm")
+            self.assertEqual(keyboard[-1][0], {"text": "Открыть в CRM", "url": expected_url})
+
+    def test_vk_restore_link_only_in_hostess_jobs(self):
+        job = {
+            "platform": "vk",
+            "bot_scope": "hostess",
+            "target_external_id": "101",
+            "message_type": "reservation_card_upsert",
+            "payload": {"reservation": {"reservation_id": 55, "booking_id": 42, "status": "completed"}},
+        }
+        with (
+            patch.object(crm_staff_links, "CRM_COMMAND_API_URL", "https://crm.example.test"),
+            patch.object(crm_notification_worker, "vk_send_message") as send,
+        ):
+            crm_notification_worker.dispatch_notification_job(job)
+            self.assertIn(
+                "Восстановить в CRM: https://crm.example.test/crm/bookings/42?reservation_id=55#restore-booking",
+                send.call_args.args[1],
+            )
+            job["bot_scope"] = "waiter"
+            crm_notification_worker.dispatch_notification_job(job)
+            self.assertNotIn("crm.example.test", send.call_args.args[1])
+
+    def test_legacy_link_uses_archive_without_api_path_or_credentials(self):
+        with (
+            patch.object(crm_staff_links, "CRM_COMMAND_API_URL", ""),
+            patch.object(crm_staff_links, "CRM_API_URL", "https://test-user:test-password@crm.example.test/api/ingest?key=test"),
+        ):
+            self.assertEqual(
+                booking_crm_keyboard(archived=True),
+                {"inline_keyboard": [[{"text": "Восстановить в CRM", "url": "https://crm.example.test/crm/archive"}]]},
+            )
+
     def test_process_batch_renders_reservation_card_and_acks_success(self):
         completed = []
         sent = []

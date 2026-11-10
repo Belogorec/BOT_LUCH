@@ -45,6 +45,7 @@ from booking_service import (
     resolve_core_reservation_id,
 )
 from booking_render import (
+    booking_crm_keyboard,
     render_booking_card,
     render_booking_card_from_reservation,
     render_guest_visits_message,
@@ -112,11 +113,13 @@ def _sync_admin_booking_card(conn, booking_id: int, command_result=None) -> None
         traceback.print_exc()
 
 
-def _edit_callback_booking_card(chat_id: str, message_id: str, command_result: dict) -> None:
+def _edit_callback_booking_card(
+    chat_id: str, message_id: str, command_result: dict, *, include_crm_link: bool,
+) -> None:
     reservation_snapshot = command_result.get("reservation") if isinstance(command_result, dict) else {}
     if not isinstance(reservation_snapshot, dict) or not reservation_snapshot:
         return
-    text_card, kb_card = render_booking_card_from_reservation(reservation_snapshot)
+    text_card, kb_card = render_booking_card_from_reservation(reservation_snapshot, include_crm_link=include_crm_link)
     tg_edit_message(chat_id, message_id, text_card, kb_card)
 
 
@@ -447,6 +450,7 @@ def tg_webhook_impl():
             parts = data.split(":")
             if len(parts) >= 3 and parts[0] == "b":
                 booking_id = int(parts[1])
+                include_crm_link = _is_backoffice_context(chat_id, actor_id)
 
                 b = load_booking_read_model(conn, booking_id)
                 if not b and not CRM_AUTHORITATIVE:
@@ -479,7 +483,7 @@ def tg_webhook_impl():
                                 actor=_tg_crm_actor(actor_id, actor_name),
                             )
                             if result.get("accepted"):
-                                _edit_callback_booking_card(chat_id, message_id, result)
+                                _edit_callback_booking_card(chat_id, message_id, result, include_crm_link=include_crm_link)
                                 _sync_admin_booking_card(conn, booking_id, result)
                                 safe_answer_callback(cq_id, "Подтверждено")
                             else:
@@ -520,7 +524,7 @@ def tg_webhook_impl():
                             }
                             tg_send_message(requester_chat_id, notify_text, notify_kb)
 
-                        text, kb = render_booking_card(conn, booking_id)
+                        text, kb = render_booking_card(conn, booking_id, include_crm_link=include_crm_link)
                         tg_edit_message(chat_id, message_id, text, kb)
                         _send_booking_event_to_crm(
                             conn,
@@ -544,7 +548,7 @@ def tg_webhook_impl():
                                 actor=_tg_crm_actor(actor_id, actor_name),
                             )
                             if result.get("accepted"):
-                                _edit_callback_booking_card(chat_id, message_id, result)
+                                _edit_callback_booking_card(chat_id, message_id, result, include_crm_link=include_crm_link)
                                 _sync_admin_booking_card(conn, booking_id, result)
                                 safe_answer_callback(cq_id, "Отменено")
                             else:
@@ -566,7 +570,7 @@ def tg_webhook_impl():
                             )
                             tg_send_message(requester_chat_id, notify_text)
 
-                        text, kb = render_booking_card(conn, booking_id)
+                        text, kb = render_booking_card(conn, booking_id, include_crm_link=include_crm_link)
                         tg_edit_message(chat_id, message_id, text, kb)
                         _send_booking_event_to_crm(
                             conn,
@@ -608,7 +612,7 @@ def tg_webhook_impl():
                                     f"Дата: {res_date} {res_time}\n"
                                     f"Гостей: {guests_cnt}"
                                 )
-                                tg_send_message(str(TG_CHAT_ID), admin_notify)
+                                tg_send_message(str(TG_CHAT_ID), admin_notify, booking_crm_keyboard(archived=True))
                             except Exception:
                                 pass
 
@@ -660,7 +664,7 @@ def tg_webhook_impl():
                                 actor=_tg_crm_actor(actor_id, actor_name),
                             )
                             if result.get("accepted"):
-                                _edit_callback_booking_card(chat_id, message_id, result)
+                                _edit_callback_booking_card(chat_id, message_id, result, include_crm_link=include_crm_link)
                                 _sync_admin_booking_card(conn, booking_id, result)
                                 safe_answer_callback(cq_id, f"Стол #{table_number} назначен")
                             else:
@@ -700,7 +704,7 @@ def tg_webhook_impl():
                                 actor=_tg_crm_actor(actor_id, actor_name),
                             )
                             if result.get("accepted"):
-                                _edit_callback_booking_card(chat_id, message_id, result)
+                                _edit_callback_booking_card(chat_id, message_id, result, include_crm_link=include_crm_link)
                                 _sync_admin_booking_card(conn, booking_id, result)
                                 safe_answer_callback(cq_id, "Стол снят")
                             else:

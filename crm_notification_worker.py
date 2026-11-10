@@ -5,6 +5,7 @@ import requests
 
 from booking_render import render_booking_card_from_reservation
 from config import CRM_COMMAND_API_KEY, CRM_COMMAND_API_URL, CRM_COMMAND_TIMEOUT
+from crm_staff_links import append_crm_staff_booking_link
 from telegram_api import tg_edit_message, tg_send_message
 from vk_api import vk_send_message
 
@@ -73,7 +74,11 @@ def dispatch_notification_job(job: dict[str, Any]) -> str:
     if message_type != "reservation_card_upsert":
         raise ValueError(f"unsupported_notification_type:{message_type or '-'}")
     reservation = payload.get("reservation") if isinstance(payload.get("reservation"), dict) else {}
-    text, reply_markup = render_booking_card_from_reservation(reservation)
+    is_hostess = bot_scope == "hostess"
+    text, reply_markup = render_booking_card_from_reservation(
+        reservation,
+        include_crm_link=is_hostess and platform == "telegram",
+    )
     message_id = str(payload.get("message_id") or "").strip()
 
     if platform == "telegram":
@@ -83,9 +88,12 @@ def dispatch_notification_job(job: dict[str, Any]) -> str:
         return str(tg_send_message(target, text, reply_markup) or "")
 
     if platform == "vk":
+        message_text = _plain_text(text)
+        if is_hostess and reservation:
+            message_text = append_crm_staff_booking_link(message_text, reservation)
         response = vk_send_message(
             int(target),
-            _plain_text(text),
+            message_text,
             bot_key=bot_scope,
         )
         if isinstance(response, dict):
